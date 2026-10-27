@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#090D16">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Slancar — AI Project Manager</title>
+
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            obsidian: '#090D16',
+            cardbg: '#131926'
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- Custom App Styles -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="bg-[#05080E] text-slate-100 flex justify-center items-center min-h-screen">
+
+  <!-- Mobile Frame Container -->
+  <div class="mobile-container w-full min-h-screen">
+    
+    <!-- Active Screen Dynamic Content -->
+    <main id="screen-content" class="flex-1">
+      <!-- Injected via app.js -->
+    </main>
+
+    <!-- Bottom Navigation Bar (5 Core Tabs) -->
+    <nav class="bottom-nav">
+      <div class="nav-item active" data-tab="dashboard" onclick="navigateTo('dashboard')">
+        <i data-lucide="layout-dashboard" class="w-5 h-5 mb-1"></i>
+        <span>Today</span>
+      </div>
+
+      <div class="nav-item" data-tab="goals" onclick="navigateTo('goals')">
+        <i data-lucide="target" class="w-5 h-5 mb-1"></i>
+        <span>Goals</span>
+      </div>
+
+      <div class="nav-item" data-tab="tasks" onclick="navigateTo('tasks')">
+        <i data-lucide="check-square" class="w-5 h-5 mb-1"></i>
+        <span>Tasks</span>
+      </div>
+
+      <div class="nav-item" data-tab="pm-chat" onclick="navigateTo('pm-chat')">
+        <i data-lucide="bot" class="w-5 h-5 mb-1"></i>
+        <span>PM Chat</span>
+      </div>
+
+      <div class="nav-item" data-tab="daily-review" onclick="navigateTo('daily-review')">
+        <i data-lucide="moon" class="w-5 h-5 mb-1"></i>
+        <span>Review</span>
+      </div>
+    </nav>
+
+    <!-- ========================================== -->
+    <!-- MODAL: CREATE TASK BOTTOM SHEET -->
+    <!-- ========================================== -->
+    <div id="task-modal" class="modal-overlay" onclick="if(event.target === this) closeModal('task-modal')">
+      <div class="modal-sheet">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-sm font-bold text-white uppercase tracking-wider">Tambah Tugas Baru</h3>
+          <button onclick="closeModal('task-modal')" class="text-gray-400 hover:text-white">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <form onsubmit="handleCreateTask(event)" class="space-y-3.5">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1">Judul Tugas</label>
+            <input id="new-task-title" type="text" required placeholder="Contoh: Texturing Destroyer Ship" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Tipe Tugas</label>
+              <select id="new-task-type" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white">
+                <option value="office_work">Office Work (100)</option>
+                <option value="client_freelance">Freelance (90)</option>
+                <option value="side_hustle">Side Hustle (80)</option>
+                <option value="gym">Gym / Fitness (60)</option>
+                <option value="learning">Learning (30)</option>
+                <option value="entertainment">Entertainment (10)</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Estimasi Jam</label>
+              <input id="new-task-hours" type="number" step="0.25" min="0.25" max="12" value="1.5" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Jenis Deadline</label>
+              <select id="new-task-deadline-type" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white">
+                <option value="soft">Soft Deadline</option>
+                <option value="hard">Hard Deadline 🔥</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Tanggal Deadline</label>
+              <input id="new-task-deadline-date" type="date" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            </div>
+          </div>
+
+          <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl text-xs mt-2 shadow-lg shadow-indigo-600/30">
+            Simpan ke Backlog
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODAL: CREATE GOAL BOTTOM SHEET -->
+    <!-- ========================================== -->
+    <div id="goal-modal" class="modal-overlay" onclick="if(event.target === this) closeModal('goal-modal')">
+      <div class="modal-sheet">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-sm font-bold text-white uppercase tracking-wider">Tambah Long-Term Goal</h3>
+          <button onclick="closeModal('goal-modal')" class="text-gray-400 hover:text-white">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <form onsubmit="handleCreateGoal(event)" class="space-y-3.5">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1">Nama Goal</label>
+            <input id="new-goal-title" type="text" required placeholder="Contoh: Belajar Blender 3D Portfolio" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white">
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Nilai Target</label>
+              <input id="new-goal-target" type="number" required placeholder="100" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-300 mb-1">Metrik Target</label>
+              <input id="new-goal-metric" type="text" required placeholder="Project / IDR / Sesi" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            </div>
+          </div>
+
+          <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl text-xs mt-2 shadow-lg shadow-indigo-600/30">
+            Simpan Goal
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODAL: CREATE PROJECT BOTTOM SHEET -->
+    <!-- ========================================== -->
+    <div id="project-modal" class="modal-overlay" onclick="if(event.target === this) closeModal('project-modal')">
+      <div class="modal-sheet">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="text-sm font-bold text-white uppercase tracking-wider">Tambah Proyek</h3>
+          <button onclick="closeModal('project-modal')" class="text-gray-400 hover:text-white">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <form onsubmit="handleCreateProject(event)" class="space-y-3.5">
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1">Nama Proyek</label>
+            <input id="new-proj-title" type="text" required placeholder="Contoh: Destroyer Ship" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white">
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1">Deskripsi Singkat</label>
+            <textarea id="new-proj-desc" rows="2" placeholder="Tujuan proyek ini..." class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-white"></textarea>
+          </div>
+
+          <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl text-xs mt-2 shadow-lg shadow-indigo-600/30">
+            Simpan Proyek
+          </button>
+        </form>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/config.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/decisionEngine.js"></script>
+  <script src="js/aiManager.js"></script>
+  <script src="js/app.js"></script>
+
+  <!-- Service Worker Registration for PWA Store Readiness -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then((reg) => console.log('ServiceWorker registered:', reg.scope))
+          .catch((err) => console.log('ServiceWorker registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+{
+  "name": "Slancar — AI Project Manager",
+  "short_name": "Slancar",
+  "description": "Autonomous AI Project Manager for solo creators and freelancers. Think first, then speak.",
+  "id": "/?source=pwa",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090D16",
+  "theme_color": "#6366F1",
+  "lang": "id",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "assets/screenshot.png",
+      "sizes": "720x1280",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Slancar Dashboard"
+    }
+  ]
+}
