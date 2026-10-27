@@ -2,7 +2,7 @@
 // SLANCAR PWA SERVICE WORKER (OFFLINE CAPABLE)
 // ==================================================
 
-const CACHE_NAME = 'slancar-v3';
+const CACHE_NAME = 'slancar-v4';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

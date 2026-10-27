@@ -1,5 +1,5 @@
 // ==================================================
-// SLANCAR MAIN APPLICATION CONTROLLER
+// SLANCAR MAIN APPLICATION CONTROLLER (v4)
 // Handles State, Navigation, and All 7 Screen Renders
 // ==================================================
 
@@ -10,6 +10,8 @@ window.AppState = {
   goals: [],
   tasks: [],
   todayPlan: null,
+  selectedGoalStars: 5,
+  customMetrics: safeGetJSON('slancar_custom_metrics', []),
   chatMessages: [
     { sender: 'pm', text: 'Halo! Saya Slancar, AI Project Manager kamu. Saya siap menganalisis prioritas dan menjaga kapasitasmu hari ini.' }
   ]
@@ -20,7 +22,7 @@ async function initApp() {
   try {
     initSupabase();
     
-    // Load local cache immediately
+    // Load local cache immediately with safe fallbacks
     AppState.profile = safeGetJSON('slancar_local_profile', {
       full_name: 'Solo Creator',
       daily_capacity_hours: 8.0,
@@ -31,26 +33,37 @@ async function initApp() {
     AppState.tasks = safeGetJSON('slancar_local_tasks', []);
     AppState.goals = safeGetJSON('slancar_local_goals', []);
     AppState.todayPlan = safeGetJSON('slancar_today_plan', null);
+    AppState.customMetrics = safeGetJSON('slancar_custom_metrics', []);
+
+    // Ensure array types
+    if (!Array.isArray(AppState.tasks)) AppState.tasks = [];
+    if (!Array.isArray(AppState.goals)) AppState.goals = [];
+    if (!Array.isArray(AppState.customMetrics)) AppState.customMetrics = [];
 
     // If no plan today, build immediate plan
     if (!AppState.todayPlan) {
-      const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
-      const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
-      AppState.todayPlan = {
-        plan_date: new Date().toISOString().split('T')[0],
-        target_capacity_hours: evaluation.rawCapacity,
-        allocated_hours: evaluation.allocatedHours,
-        schedule_slots: slots,
-        pm_reasoning: 'Selamat pagi! Kapasitas produktif hari ini diatur untuk menyelesaikan komitmen berbatas waktu terdekat dengan aman.',
-        status: 'active'
-      };
-      safeSetJSON('slancar_today_plan', AppState.todayPlan);
+      try {
+        const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
+        const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
+        AppState.todayPlan = {
+          plan_date: new Date().toISOString().split('T')[0],
+          target_capacity_hours: evaluation.rawCapacity,
+          allocated_hours: evaluation.allocatedHours,
+          schedule_slots: slots,
+          pm_reasoning: 'Selamat pagi! Kapasitas produktif hari ini diatur untuk menyelesaikan komitmen berbatas waktu terdekat dengan aman.',
+          status: 'active'
+        };
+        safeSetJSON('slancar_today_plan', AppState.todayPlan);
+      } catch (deErr) {
+        console.warn('Initial plan build note:', deErr);
+      }
     }
 
     // Direct render to Today / Dashboard
     navigateTo('dashboard');
   } catch (err) {
     console.error('Init error:', err);
+    navigateTo('dashboard');
   }
 
   // Background sync
@@ -85,13 +98,19 @@ async function loadAppData() {
 // 06:00 Daily Planning Execution
 async function runMorningPlanning(forceReplan = false) {
   try {
-    const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
-    const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
+    const profile = AppState.profile || { daily_capacity_hours: 8.0, buffer_percentage: 0.15, office_start_time: '09:00' };
+    const tasks = Array.isArray(AppState.tasks) ? AppState.tasks : [];
+
+    const evaluation = SlancarDecisionEngine.evaluateDayPlan(profile, tasks);
+    const slots = SlancarDecisionEngine.generateScheduleSlots(profile, evaluation.scheduledTasks);
 
     // Generate PM Strategic Reason
-    let pmReasoning = await SlancarAI.synthesizeMorningPlan(AppState.profile, evaluation, slots);
-    if (!pmReasoning) {
-      pmReasoning = `Kapasitas produktif hari ini diatur ${evaluation.allocatedHours.toFixed(1)} jam dengan safety buffer ${evaluation.bufferHours.toFixed(1)} jam. Fokus pada prioritas tertinggi.`;
+    let pmReasoning = 'Selamat pagi! Kapasitas produktif hari ini telah dihitung ulang secara objektif. Lindungi buffer energimu.';
+    try {
+      const aiText = await SlancarAI.synthesizeMorningPlan(profile, evaluation, slots);
+      if (aiText) pmReasoning = aiText;
+    } catch (aiErr) {
+      console.warn('AI reasoning fallback used:', aiErr);
     }
 
     const todayStr = new Date().toISOString().split('T')[0];
@@ -107,12 +126,10 @@ async function runMorningPlanning(forceReplan = false) {
     AppState.todayPlan = await SlancarDB.saveDailyPlan(newPlan);
     renderApp();
 
-    if (forceReplan) {
-      showToast('Jadwal hari ini berhasil dikalkulasi ulang!');
-    }
+    showToast('Jadwal hari ini berhasil dikalkulasi ulang!');
   } catch (e) {
     console.error('Failed to run morning planning:', e);
-    showToast('Terjadi kesalahan saat mengalkulasi jadwal.', 'error');
+    showToast('Terjadi kesalahan saat mengalkulasi jadwal: ' + (e?.message || e), 'error');
   }
 }
 
@@ -133,7 +150,7 @@ function renderApp() {
   if (window.lucide) lucide.createIcons();
 }
 
-// Toast notification helper
+// Toast notification helper with detailed message support
 function showToast(message, type = 'success') {
   const toast = document.getElementById('toast');
   if (!toast) return;
@@ -141,7 +158,7 @@ function showToast(message, type = 'success') {
   toast.className = `toast show ${type === 'error' ? 'bg-rose-600' : 'bg-indigo-600'}`;
   setTimeout(() => {
     toast.className = 'toast';
-  }, 3000);
+  }, 4500);
 }
 
 // Render active screen
@@ -185,7 +202,7 @@ function renderDashboardScreen() {
   const allocPercent = Math.min(Math.round((alloc / rawCap) * 100), 100);
 
   const today = new Date().setHours(0,0,0,0);
-  const overdueTasks = (AppState.tasks || []).filter(t => t.status !== 'completed' && t.deadline_date && new Date(t.deadline_date) < today);
+  const overdueTasks = (Array.isArray(AppState.tasks) ? AppState.tasks : []).filter(t => t.status !== 'completed' && t.deadline_date && new Date(t.deadline_date) < today);
 
   return `
     <div class="p-4 space-y-4">
@@ -322,15 +339,17 @@ function renderDashboardScreen() {
 }
 
 // ==========================================
-// 2. GOALS SCREEN
+// 2. GOALS SCREEN (Priority Stars & Custom Metrics)
 // ==========================================
 function renderGoalsScreen() {
+  const goalsList = Array.isArray(AppState.goals) ? AppState.goals : [];
+
   return `
     <div class="p-4 space-y-4">
       <div class="flex items-center justify-between pt-2">
         <div>
           <p class="text-xs text-gray-400 font-medium">LONG-TERM TARGETS</p>
-          <h1 class="text-xl font-bold text-white tracking-tight">Goals & Milestones</h1>
+          <h1 class="text-xl font-bold text-white tracking-tight">Goals & Prioritas</h1>
         </div>
         <button onclick="openModal('goal-modal')" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-lg shadow-indigo-600/30">
           <i data-lucide="plus" class="w-4 h-4"></i> Tambah Goal
@@ -338,16 +357,22 @@ function renderGoalsScreen() {
       </div>
 
       <div class="space-y-3">
-        ${(AppState.goals || []).map(g => {
+        ${goalsList.length === 0 ? `
+          <div class="text-center py-12 text-gray-500 text-xs">Belum ada Goal. Klik '+ Tambah Goal' untuk membuat target barumu.</div>
+        ` : goalsList.map(g => {
           const milestones = Array.isArray(g.milestones) ? g.milestones : [];
+          const stars = parseInt(g.priority_stars, 10) || 5;
+          const starsDisplay = '★'.repeat(stars) + '☆'.repeat(5 - stars);
+
           return `
-            <div class="sl-card space-y-3">
+            <div class="sl-card space-y-2.5">
               <div class="flex justify-between items-start">
-                <div>
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="text-amber-400 text-sm tracking-wider font-bold">${starsDisplay}</span>
+                    <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-gray-300 font-medium">${g.metric || 'Project'}</span>
+                  </div>
                   <h3 class="text-sm font-bold text-white">${g.title}</h3>
-                  <p class="text-xs text-gray-400 mt-0.5 font-mono">
-                    Target: ${typeof g.target_value === 'number' && g.metric === 'IDR' ? 'Rp' + g.target_value.toLocaleString() : `${g.target_value} ${g.metric}`}
-                  </p>
                 </div>
                 <span class="text-xs font-mono font-bold text-cyan-400">${Math.round(g.progress || 0)}%</span>
               </div>
@@ -375,15 +400,67 @@ function renderGoalsScreen() {
   `;
 }
 
+// Star Selector Function
+function selectGoalStars(count) {
+  AppState.selectedGoalStars = count;
+  document.querySelectorAll('.star-btn').forEach((btn, idx) => {
+    btn.classList.toggle('text-amber-400', idx < count);
+    btn.classList.toggle('text-gray-600', idx >= count);
+  });
+}
+
+// Metric Dropdown Change
+function handleGoalMetricChange(val) {
+  const customBox = document.getElementById('custom-goal-metric-box');
+  if (customBox) {
+    customBox.classList.toggle('hidden', val !== 'custom');
+  }
+}
+
+// Delete Custom Metric
+function deleteCustomMetric(metricName) {
+  AppState.customMetrics = (AppState.customMetrics || []).filter(m => m !== metricName);
+  safeSetJSON('slancar_custom_metrics', AppState.customMetrics);
+  renderGoalMetricDropdown();
+  showToast(`Metrik "${metricName}" berhasil dihapus.`);
+}
+
+// Refresh Goal Metric Dropdown
+function renderGoalMetricDropdown() {
+  const select = document.getElementById('new-goal-metric-select');
+  const chipContainer = document.getElementById('custom-metric-chips');
+  if (!select) return;
+
+  const standardMetrics = ['Sesi', 'Project', 'IDR'];
+  let optionsHtml = standardMetrics.map(m => `<option value="${m}">${m}</option>`).join('');
+
+  const customs = AppState.customMetrics || [];
+  if (customs.length > 0) {
+    optionsHtml += customs.map(m => `<option value="${m}">${m} (Kustom)</option>`).join('');
+  }
+  optionsHtml += `<option value="custom">+ Tambah Metrik Baru...</option>`;
+  select.innerHTML = optionsHtml;
+
+  if (chipContainer) {
+    chipContainer.innerHTML = customs.map(m => `
+      <span class="inline-flex items-center gap-1 text-[11px] bg-slate-800 text-gray-300 px-2 py-0.5 rounded-lg border border-slate-700">
+        ${m}
+        <button type="button" onclick="deleteCustomMetric('${m}')" class="text-rose-400 hover:text-rose-300 font-bold ml-1">×</button>
+      </span>
+    `).join('');
+  }
+}
+
 // ==========================================
 // 3. TASKS SCREEN (Custom Types & Priority)
 // ==========================================
 let currentTaskFilter = 'all';
 
 function renderTasksScreen() {
+  const taskList = Array.isArray(AppState.tasks) ? AppState.tasks : [];
   const filteredTasks = currentTaskFilter === 'all'
-    ? (AppState.tasks || [])
-    : (AppState.tasks || []).filter(t => t.task_type === currentTaskFilter || t.custom_type_name === currentTaskFilter);
+    ? taskList
+    : taskList.filter(t => t.task_type === currentTaskFilter || t.custom_type_name === currentTaskFilter);
 
   const filterTabs = [
     { id: 'all', label: 'Semua' },
@@ -422,7 +499,7 @@ function renderTasksScreen() {
         ` : filteredTasks.map(t => {
           const score = SlancarDecisionEngine.calculateScore(t);
           const isDone = t.status === 'completed';
-          const typeName = t.custom_type_name || t.task_type.replace('_', ' ');
+          const typeName = t.custom_type_name || (t.task_type ? t.task_type.replace('_', ' ') : 'Tugas');
 
           return `
             <div class="sl-card flex items-start gap-3 p-3.5 ${isDone ? 'opacity-50' : ''}">
@@ -519,7 +596,7 @@ function renderPMChatScreen() {
 }
 
 async function handleSendChat(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   const input = document.getElementById('chat-input');
   const text = input ? input.value.trim() : '';
   if (!text) return;
@@ -529,8 +606,12 @@ async function handleSendChat(e) {
   renderScreenContent();
   if (window.lucide) lucide.createIcons();
 
-  const pmReply = await SlancarAI.chatWithPM(text, AppState.todayPlan, AppState.tasks);
-  AppState.chatMessages.push({ sender: 'pm', text: pmReply });
+  try {
+    const pmReply = await SlancarAI.chatWithPM(text, AppState.todayPlan, AppState.tasks);
+    AppState.chatMessages.push({ sender: 'pm', text: pmReply });
+  } catch (err) {
+    AppState.chatMessages.push({ sender: 'pm', text: 'Saya mendengar kendalamu. Mari kita sesuaikan prioritas tugas terdekat.' });
+  }
   renderScreenContent();
   if (window.lucide) lucide.createIcons();
 }
@@ -547,8 +628,9 @@ function sendQuickChatMessage(text) {
 // 5. DAILY REVIEW SCREEN (21:00 Evening Review)
 // ==========================================
 function renderDailyReviewScreen() {
-  const completed = (AppState.tasks || []).filter(t => t.status === 'completed');
-  const failed = (AppState.tasks || []).filter(t => t.status !== 'completed');
+  const taskList = Array.isArray(AppState.tasks) ? AppState.tasks : [];
+  const completed = taskList.filter(t => t.status === 'completed');
+  const failed = taskList.filter(t => t.status !== 'completed');
 
   return `
     <div class="p-4 space-y-4">
@@ -612,13 +694,15 @@ async function submitDailyReview() {
     const mood = document.getElementById('review-mood')?.value || 'Normal';
     const notes = document.getElementById('review-notes')?.value || '';
 
-    const completed = (AppState.tasks || []).filter(t => t.status === 'completed');
-    const failed = (AppState.tasks || []).filter(t => t.status !== 'completed');
+    const taskList = Array.isArray(AppState.tasks) ? AppState.tasks : [];
+    const completed = taskList.filter(t => t.status === 'completed');
+    const failed = taskList.filter(t => t.status !== 'completed');
 
-    let pmFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
-    if (!pmFeedback) {
-      pmFeedback = `Evaluasi malam ini tercatat. Kamu menyelesaikan ${completed.length} tugas. Istirahat yang cukup untuk mengembalikan energimu besok.`;
-    }
+    let pmFeedback = `Evaluasi malam ini tercatat. Kamu menyelesaikan ${completed.length} tugas. Istirahat yang cukup untuk mengembalikan energimu besok.`;
+    try {
+      const aiFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
+      if (aiFeedback) pmFeedback = aiFeedback;
+    } catch (e) {}
 
     const todayStr = new Date().toISOString().split('T')[0];
     await SlancarDB.saveDailyReview({
@@ -643,7 +727,7 @@ async function submitDailyReview() {
     renderApp();
   } catch (err) {
     console.error('Error submitting daily review:', err);
-    showToast('Gagal menyimpan review malam.', 'error');
+    showToast('Gagal menyimpan review malam: ' + (err?.message || err), 'error');
   }
 }
 
@@ -671,6 +755,17 @@ function renderProfileScreen() {
             <p class="text-[11px] text-gray-400">${isCloud ? `Akun: ${userEmail}` : 'Data tersimpan di HP & siap sync ke Supabase'}</p>
           </div>
         </div>
+      </div>
+
+      <!-- Quick Cache Cleaner / Update Button -->
+      <div class="sl-card border-cyan-800/40 bg-cyan-950/20 p-3 flex items-center justify-between">
+        <div class="text-xs">
+          <span class="font-bold text-cyan-300">Pembaruan & Cache</span>
+          <p class="text-[10px] text-gray-400">Bersihkan cache jika baru update kode di GitHub.</p>
+        </div>
+        <button onclick="forceAppRefresh()" class="bg-cyan-600 hover:bg-cyan-500 text-white font-medium py-1.5 px-3 rounded-lg text-xs flex items-center gap-1">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh Cache
+        </button>
       </div>
 
       <!-- Supabase Auth Section -->
@@ -701,7 +796,7 @@ function renderProfileScreen() {
                 Masuk (Login)
               </button>
               <button onclick="handleSignUp()" class="bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2 rounded-lg text-xs">
-                Daftar Aku Baru
+                Daftar Akun Baru
               </button>
             </div>
             <p class="text-[10px] text-gray-500">Dengan login, data tugas & jadwalmu akan tersimpan aman di server Supabase.</p>
@@ -777,6 +872,26 @@ function renderProfileScreen() {
   `;
 }
 
+// Force App Refresh & Cache Purge
+function forceAppRefresh() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(registrations => {
+      for (let registration of registrations) {
+        registration.unregister();
+      }
+    });
+  }
+  if ('caches' in window) {
+    caches.keys().then(names => {
+      for (let name of names) caches.delete(name);
+    });
+  }
+  showToast('Membersihkan cache... Aplikasi memuat ulang.');
+  setTimeout(() => {
+    window.location.reload(true);
+  }, 800);
+}
+
 async function handleSignUp() {
   const email = document.getElementById('auth-email')?.value.trim();
   const password = document.getElementById('auth-password')?.value.trim();
@@ -791,7 +906,7 @@ async function handleSignUp() {
     await loadAppData();
     renderApp();
   } catch (e) {
-    showToast(e.message || 'Gagal mendaftar', 'error');
+    showToast('Gagal mendaftar: ' + (e?.message || e), 'error');
   }
 }
 
@@ -809,7 +924,7 @@ async function handleSignIn() {
     await loadAppData();
     renderApp();
   } catch (e) {
-    showToast(e.message || 'Gagal masuk', 'error');
+    showToast('Gagal masuk: ' + (e?.message || e), 'error');
   }
 }
 
@@ -847,20 +962,30 @@ async function saveProfileSettings() {
 
 // Actions
 async function markTaskDone(taskId) {
-  await SlancarDB.updateTaskStatus(taskId, 'completed');
-  const t = (AppState.tasks || []).find(x => x.id === taskId);
-  if (t) t.status = 'completed';
-  showToast('Tugas ditandai selesai! Bagus sekali.');
-  renderApp();
+  try {
+    await SlancarDB.updateTaskStatus(taskId, 'completed');
+    const tasks = Array.isArray(AppState.tasks) ? AppState.tasks : [];
+    const t = tasks.find(x => x.id === taskId);
+    if (t) t.status = 'completed';
+    showToast('Tugas ditandai selesai! Bagus sekali.');
+    renderApp();
+  } catch (err) {
+    showToast('Gagal menandai selesai: ' + (err?.message || err), 'error');
+  }
 }
 
 async function toggleTaskDone(taskId) {
-  const t = (AppState.tasks || []).find(x => x.id === taskId);
-  if (!t) return;
-  const newStatus = t.status === 'completed' ? 'todo' : 'completed';
-  await SlancarDB.updateTaskStatus(taskId, newStatus);
-  t.status = newStatus;
-  renderApp();
+  try {
+    const tasks = Array.isArray(AppState.tasks) ? AppState.tasks : [];
+    const t = tasks.find(x => x.id === taskId);
+    if (!t) return;
+    const newStatus = t.status === 'completed' ? 'todo' : 'completed';
+    await SlancarDB.updateTaskStatus(taskId, newStatus);
+    t.status = newStatus;
+    renderApp();
+  } catch (err) {
+    showToast('Gagal memperbarui status: ' + (err?.message || err), 'error');
+  }
 }
 
 // Modal Helpers
@@ -868,6 +993,10 @@ function openModal(id) {
   const el = document.getElementById(id);
   if (el) {
     el.classList.add('active');
+    if (id === 'goal-modal') {
+      renderGoalMetricDropdown();
+      selectGoalStars(AppState.selectedGoalStars || 5);
+    }
     if (window.lucide) lucide.createIcons();
   }
 }
@@ -921,17 +1050,32 @@ async function handleCreateTask(e) {
     renderApp();
   } catch (err) {
     console.error('Error creating task:', err);
-    showToast('Gagal menambahkan tugas.', 'error');
+    showToast('Gagal menambahkan tugas: ' + (err?.message || err), 'error');
   }
 }
 
-// Goal Creator
+// Goal Creator with Star Ratings & Custom Metrics
 async function handleCreateGoal(e) {
   if (e && e.preventDefault) e.preventDefault();
   try {
     const title = document.getElementById('new-goal-title')?.value.trim();
-    const target = parseFloat(document.getElementById('new-goal-target')?.value) || 100;
-    const metric = document.getElementById('new-goal-metric')?.value.trim() || 'Unit';
+    const stars = AppState.selectedGoalStars || 5;
+    const metricSelect = document.getElementById('new-goal-metric-select')?.value || 'Project';
+    const customMetricInput = document.getElementById('new-goal-custom-metric')?.value.trim() || '';
+
+    let finalMetric = metricSelect;
+    if (metricSelect === 'custom') {
+      if (!customMetricInput) {
+        showToast('Ketikkan nama metrik kustommu', 'error');
+        return;
+      }
+      finalMetric = customMetricInput;
+      // Save new custom metric to list if not already there
+      if (!AppState.customMetrics.includes(finalMetric)) {
+        AppState.customMetrics.push(finalMetric);
+        safeSetJSON('slancar_custom_metrics', AppState.customMetrics);
+      }
+    }
 
     if (!title) {
       showToast('Judul Goal harus diisi', 'error');
@@ -940,8 +1084,9 @@ async function handleCreateGoal(e) {
 
     await SlancarDB.createGoal({
       title,
-      target_value: target,
-      metric,
+      priority_stars: stars,
+      target_value: stars,
+      metric: finalMetric,
       current_value: 0
     });
 
@@ -949,13 +1094,15 @@ async function handleCreateGoal(e) {
 
     const goalInput = document.getElementById('new-goal-title');
     if (goalInput) goalInput.value = '';
+    const customMetricEl = document.getElementById('new-goal-custom-metric');
+    if (customMetricEl) customMetricEl.value = '';
 
     closeModal('goal-modal');
-    showToast('Goal berhasil dibuat!');
+    showToast(`Goal '${title}' (${stars} Bintang) berhasil dibuat!`);
     renderApp();
   } catch (err) {
     console.error('Error creating goal:', err);
-    showToast('Gagal membuat goal.', 'error');
+    showToast('Gagal membuat goal: ' + (err?.message || err), 'error');
   }
 }
 

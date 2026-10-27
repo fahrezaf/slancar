@@ -1,16 +1,21 @@
 // ==================================================
-// SLANCAR SUPABASE CLIENT & DATA LAYER
-// Resilient, Self-Contained, Zero-Dependency Data Layer
+// SLANCAR SUPABASE CLIENT & DATA LAYER (v4)
+// 100% Robust, Array-Guarded, Self-Contained
 // ==================================================
 
 let supabase = null;
 let currentUser = null;
 
-// Safe Local Storage Helpers (Never Crash)
+// Safe Local Storage Helpers with Strict Array/Object Guard
 function safeGetJSON(key, defaultVal) {
   try {
     const item = localStorage.getItem(key);
-    return item ? JSON.parse(item) : defaultVal;
+    if (!item) return defaultVal;
+    const parsed = JSON.parse(item);
+    if (Array.isArray(defaultVal)) {
+      return Array.isArray(parsed) ? parsed : defaultVal;
+    }
+    return (parsed && typeof parsed === 'object') ? parsed : defaultVal;
   } catch (e) {
     return defaultVal;
   }
@@ -25,11 +30,10 @@ function safeSetJSON(key, val) {
 }
 
 function initSupabase() {
-  if (SlancarConfig.isConfigured() && window.supabase) {
+  if (typeof SlancarConfig !== 'undefined' && SlancarConfig.isConfigured() && window.supabase) {
     try {
       supabase = window.supabase.createClient(SlancarConfig.SUPABASE_URL, SlancarConfig.SUPABASE_ANON_KEY);
       
-      // Auto-listen to auth state changes
       supabase.auth.getSession().then(({ data: { session } }) => {
         currentUser = session?.user || null;
         if (window.AppState) window.AppState.user = currentUser;
@@ -113,11 +117,9 @@ const SlancarDB = {
 
     if (this.isCloudReady() && userId) {
       try {
-        const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+        const { data } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
         if (data) return data;
-      } catch (e) {
-        console.warn('Cloud profile fetch warning:', e);
-      }
+      } catch (e) {}
     }
     return safeGetJSON('slancar_local_profile', defaultProfile);
   },
@@ -138,6 +140,7 @@ const SlancarDB = {
       {
         id: 'goal-1',
         title: 'Target Penghasilan Rp20,000,000/bulan',
+        priority_stars: 5,
         target_value: 20000000,
         current_value: 12500000,
         metric: 'IDR',
@@ -148,6 +151,7 @@ const SlancarDB = {
       {
         id: 'goal-2',
         title: 'Bangun Portofolio Behance 3D',
+        priority_stars: 4,
         target_value: 5,
         current_value: 3,
         metric: 'Project',
@@ -158,6 +162,7 @@ const SlancarDB = {
       {
         id: 'goal-3',
         title: 'Gym & Fitness 4x Seminggu',
+        priority_stars: 3,
         target_value: 4,
         current_value: 2,
         metric: 'Sesi',
@@ -169,18 +174,21 @@ const SlancarDB = {
 
     if (this.isCloudReady() && userId) {
       try {
-        const { data, error } = await supabase.from('goals').select('*').eq('user_id', userId).order('created_at', { ascending: false });
-        if (data && data.length > 0) return data;
+        const { data } = await supabase.from('goals').select('*').eq('user_id', userId).order('created_at', { ascending: false });
+        if (Array.isArray(data) && data.length > 0) return data;
       } catch (e) {}
     }
     return safeGetJSON('slancar_local_goals', defaultGoals);
   },
 
   async createGoal(goalData) {
-    const goals = await this.getGoals();
+    let goals = await this.getGoals();
+    if (!Array.isArray(goals)) goals = [];
+
     const newGoal = {
       id: 'goal-' + Date.now(),
       ...goalData,
+      priority_stars: parseInt(goalData.priority_stars, 10) || 5,
       progress: 0,
       status: 'active',
       milestones: [],
@@ -189,12 +197,15 @@ const SlancarDB = {
 
     if (this.isCloudReady() && currentUser?.id) {
       try {
-        const { data } = await supabase.from('goals').insert({
-          ...goalData,
-          user_id: currentUser.id
+        const { data, error } = await supabase.from('goals').insert({
+          user_id: currentUser.id,
+          title: newGoal.title,
+          target_value: newGoal.target_value,
+          metric: newGoal.metric,
+          current_value: 0
         }).select().single();
         if (data) {
-          goals.unshift(data);
+          goals.unshift({ ...newGoal, ...data });
           safeSetJSON('slancar_local_goals', goals);
           return data;
         }
@@ -259,14 +270,16 @@ const SlancarDB = {
     if (this.isCloudReady() && userId) {
       try {
         const { data } = await supabase.from('tasks').select('*').eq('user_id', userId).order('priority_score', { ascending: false });
-        if (data && data.length > 0) return data;
+        if (Array.isArray(data) && data.length > 0) return data;
       } catch (e) {}
     }
     return safeGetJSON('slancar_local_tasks', defaultTasks);
   },
 
   async createTask(taskData) {
-    const tasks = await this.getTasks();
+    let tasks = await this.getTasks();
+    if (!Array.isArray(tasks)) tasks = [];
+
     const newTask = {
       id: 'task-' + Date.now(),
       ...taskData,
@@ -277,11 +290,15 @@ const SlancarDB = {
     if (this.isCloudReady() && currentUser?.id) {
       try {
         const { data } = await supabase.from('tasks').insert({
-          ...taskData,
-          user_id: currentUser.id
+          user_id: currentUser.id,
+          title: newTask.title,
+          task_type: newTask.task_type || 'side_hustle',
+          estimated_hours: newTask.estimated_hours,
+          deadline_type: newTask.deadline_type,
+          deadline_date: newTask.deadline_date
         }).select().single();
         if (data) {
-          tasks.unshift(data);
+          tasks.unshift({ ...newTask, ...data });
           safeSetJSON('slancar_local_tasks', tasks);
           return data;
         }
@@ -296,17 +313,18 @@ const SlancarDB = {
   },
 
   async updateTaskStatus(taskId, status) {
-    const tasks = await this.getTasks();
-    const task = tasks.find(t => t.id === taskId);
-    if (task) task.status = status;
-    safeSetJSON('slancar_local_tasks', tasks);
+    let tasks = await this.getTasks();
+    if (Array.isArray(tasks)) {
+      const task = tasks.find(t => t.id === taskId);
+      if (task) task.status = status;
+      safeSetJSON('slancar_local_tasks', tasks);
+    }
 
     if (this.isCloudReady() && currentUser?.id) {
       try {
         await supabase.from('tasks').update({ status }).eq('id', taskId);
       } catch (e) {}
     }
-    return task;
   },
 
   async getDailyPlan(userId, dateStr) {
