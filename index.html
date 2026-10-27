@@ -35,6 +35,30 @@
 
   <!-- Custom App Styles -->
   <link rel="stylesheet" href="css/style.css">
+
+  <!-- NUCLEAR CACHE BUSTER: Runs first, kills all old SW and caches -->
+  <script>
+    (function() {
+      // Unregister ALL old service workers
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          registrations.forEach(function(reg) {
+            reg.unregister();
+            console.log('Unregistered old SW:', reg.scope);
+          });
+        });
+      }
+      // Clear ALL caches
+      if ('caches' in window) {
+        caches.keys().then(function(keys) {
+          keys.forEach(function(key) {
+            caches.delete(key);
+            console.log('Deleted cache:', key);
+          });
+        });
+      }
+    })();
+  </script>
 </head>
 <body class="bg-[#05080E] text-slate-100 flex justify-center items-center min-h-screen">
 
