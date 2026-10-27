@@ -3,12 +3,11 @@
 // Handles State, Navigation, and All 7 Screen Renders
 // ==================================================
 
-const AppState = {
+window.AppState = {
   currentTab: 'dashboard',
   user: null,
   profile: null,
   goals: [],
-  projects: [],
   tasks: [],
   todayPlan: null,
   chatMessages: [
@@ -16,33 +15,56 @@ const AppState = {
   ]
 };
 
-// Initialize App
-document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Initial Instant Render with defaults so screen is NEVER blank
-  initSupabase();
-  AppState.profile = JSON.parse(localStorage.getItem('slancar_local_profile')) || {
-    full_name: 'Solo Creator',
-    daily_capacity_hours: 8.0,
-    buffer_percentage: 0.15,
-    office_start_time: '09:00',
-    office_end_time: '17:00'
-  };
-  AppState.tasks = JSON.parse(localStorage.getItem('slancar_local_tasks')) || [];
-  AppState.goals = JSON.parse(localStorage.getItem('slancar_local_goals')) || [];
-  
-  renderApp();
-  lucide.createIcons();
-
-  // 2. Load fresh data from Cloud/Storage in background
+// Immediate Launch Function (Never Blank on Refresh)
+async function initApp() {
   try {
-    await loadAppData();
-  } catch (e) {
-    console.warn('Background sync error, using cached data:', e);
-  } finally {
-    renderApp();
-    lucide.createIcons();
+    initSupabase();
+    
+    // Load local cache immediately
+    AppState.profile = safeGetJSON('slancar_local_profile', {
+      full_name: 'Solo Creator',
+      daily_capacity_hours: 8.0,
+      buffer_percentage: 0.15,
+      office_start_time: '09:00',
+      office_end_time: '17:00'
+    });
+    AppState.tasks = safeGetJSON('slancar_local_tasks', []);
+    AppState.goals = safeGetJSON('slancar_local_goals', []);
+    AppState.todayPlan = safeGetJSON('slancar_today_plan', null);
+
+    // If no plan today, build immediate plan
+    if (!AppState.todayPlan) {
+      const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
+      const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
+      AppState.todayPlan = {
+        plan_date: new Date().toISOString().split('T')[0],
+        target_capacity_hours: evaluation.rawCapacity,
+        allocated_hours: evaluation.allocatedHours,
+        schedule_slots: slots,
+        pm_reasoning: 'Selamat pagi! Kapasitas produktif hari ini diatur untuk menyelesaikan komitmen berbatas waktu terdekat dengan aman.',
+        status: 'active'
+      };
+      safeSetJSON('slancar_today_plan', AppState.todayPlan);
+    }
+
+    // Direct render to Today / Dashboard
+    navigateTo('dashboard');
+  } catch (err) {
+    console.error('Init error:', err);
   }
-});
+
+  // Background sync
+  loadAppData().then(() => {
+    renderApp();
+  }).catch(() => {});
+}
+
+// Dual Event Hook: runs immediately if DOM is already ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
 
 // Load All Core Data
 async function loadAppData() {
@@ -53,27 +75,24 @@ async function loadAppData() {
     AppState.tasks = await SlancarDB.getTasks(AppState.user?.id);
 
     const todayStr = new Date().toISOString().split('T')[0];
-    AppState.todayPlan = await SlancarDB.getDailyPlan(AppState.user?.id, todayStr);
-
-    // If today's plan doesn't exist yet, auto-build using Decision Engine
-    if (!AppState.todayPlan) {
-      await runMorningPlanning(false);
-    }
+    const plan = await SlancarDB.getDailyPlan(AppState.user?.id, todayStr);
+    if (plan) AppState.todayPlan = plan;
   } catch (err) {
-    console.error('Error in loadAppData:', err);
+    console.warn('Sync load data note:', err);
   }
 }
 
 // 06:00 Daily Planning Execution
 async function runMorningPlanning(forceReplan = false) {
   try {
-    if (AppState.todayPlan && !forceReplan) return;
-
     const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
     const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
 
     // Generate PM Strategic Reason
-    const pmReasoning = await SlancarAI.synthesizeMorningPlan(AppState.profile, evaluation, slots);
+    let pmReasoning = await SlancarAI.synthesizeMorningPlan(AppState.profile, evaluation, slots);
+    if (!pmReasoning) {
+      pmReasoning = `Kapasitas produktif hari ini diatur ${evaluation.allocatedHours.toFixed(1)} jam dengan safety buffer ${evaluation.bufferHours.toFixed(1)} jam. Fokus pada prioritas tertinggi.`;
+    }
 
     const todayStr = new Date().toISOString().split('T')[0];
     const newPlan = {
@@ -87,7 +106,6 @@ async function runMorningPlanning(forceReplan = false) {
 
     AppState.todayPlan = await SlancarDB.saveDailyPlan(newPlan);
     renderApp();
-    lucide.createIcons();
 
     if (forceReplan) {
       showToast('Jadwal hari ini berhasil dikalkulasi ulang!');
@@ -105,14 +123,14 @@ function navigateTo(tabName) {
     el.classList.toggle('active', el.dataset.tab === tabName);
   });
   renderScreenContent();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // Master Render
 function renderApp() {
   renderScreenContent();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
 }
 
 // Toast notification helper
@@ -444,7 +462,7 @@ function renderTasksScreen() {
 function setTaskFilter(type) {
   currentTaskFilter = type;
   renderScreenContent();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
 }
 
 // ==========================================
@@ -503,23 +521,26 @@ function renderPMChatScreen() {
 async function handleSendChat(e) {
   e.preventDefault();
   const input = document.getElementById('chat-input');
-  const text = input.value.trim();
+  const text = input ? input.value.trim() : '';
   if (!text) return;
 
   AppState.chatMessages.push({ sender: 'user', text });
   input.value = '';
   renderScreenContent();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
 
   const pmReply = await SlancarAI.chatWithPM(text, AppState.todayPlan, AppState.tasks);
   AppState.chatMessages.push({ sender: 'pm', text: pmReply });
   renderScreenContent();
-  lucide.createIcons();
+  if (window.lucide) lucide.createIcons();
 }
 
 function sendQuickChatMessage(text) {
-  document.getElementById('chat-input').value = text;
-  handleSendChat(new Event('submit'));
+  const input = document.getElementById('chat-input');
+  if (input) {
+    input.value = text;
+    handleSendChat(new Event('submit'));
+  }
 }
 
 // ==========================================
@@ -587,14 +608,17 @@ function renderDailyReviewScreen() {
 
 async function submitDailyReview() {
   try {
-    const energy = parseInt(document.getElementById('review-energy').value, 10);
-    const mood = document.getElementById('review-mood').value;
-    const notes = document.getElementById('review-notes').value;
+    const energy = parseInt(document.getElementById('review-energy')?.value || '3', 10);
+    const mood = document.getElementById('review-mood')?.value || 'Normal';
+    const notes = document.getElementById('review-notes')?.value || '';
 
     const completed = (AppState.tasks || []).filter(t => t.status === 'completed');
     const failed = (AppState.tasks || []).filter(t => t.status !== 'completed');
 
-    const pmFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
+    let pmFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
+    if (!pmFeedback) {
+      pmFeedback = `Evaluasi malam ini tercatat. Kamu menyelesaikan ${completed.length} tugas. Istirahat yang cukup untuk mengembalikan energimu besok.`;
+    }
 
     const todayStr = new Date().toISOString().split('T')[0];
     await SlancarDB.saveDailyReview({
@@ -616,6 +640,7 @@ async function submitDailyReview() {
     }
 
     showToast('Review malam berhasil disimpan!');
+    renderApp();
   } catch (err) {
     console.error('Error submitting daily review:', err);
     showToast('Gagal menyimpan review malam.', 'error');
@@ -628,6 +653,7 @@ async function submitDailyReview() {
 function renderProfileScreen() {
   const p = AppState.profile || {};
   const isCloud = SlancarDB.isCloudReady();
+  const userEmail = AppState.user?.email || '';
 
   return `
     <div class="p-4 space-y-4">
@@ -642,7 +668,7 @@ function renderProfileScreen() {
           <div class="w-3 h-3 rounded-full ${isCloud ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}"></div>
           <div>
             <h4 class="text-xs font-bold text-white">Status Database: ${isCloud ? 'Cloud Sync Aktif' : 'Penyimpanan Lokal'}</h4>
-            <p class="text-[11px] text-gray-400">${isCloud ? `Akun: ${AppState.user.email}` : 'Data tersimpan di HP & siap sync ke Supabase'}</p>
+            <p class="text-[11px] text-gray-400">${isCloud ? `Akun: ${userEmail}` : 'Data tersimpan di HP & siap sync ke Supabase'}</p>
           </div>
         </div>
       </div>
@@ -655,7 +681,7 @@ function renderProfileScreen() {
         
         ${isCloud ? `
           <div class="space-y-2">
-            <p class="text-xs text-gray-300">Terhubung sebagai: <strong>${AppState.user.email}</strong></p>
+            <p class="text-xs text-gray-300">Terhubung sebagai: <strong>${userEmail}</strong></p>
             <button onclick="handleSignOut()" class="w-full bg-slate-800 hover:bg-slate-700 text-rose-400 font-medium py-2 rounded-lg text-xs">
               Keluar (Sign Out)
             </button>
@@ -675,7 +701,7 @@ function renderProfileScreen() {
                 Masuk (Login)
               </button>
               <button onclick="handleSignUp()" class="bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2 rounded-lg text-xs">
-                Daftar Akun Baru
+                Daftar Aku Baru
               </button>
             </div>
             <p class="text-[10px] text-gray-500">Dengan login, data tugas & jadwalmu akan tersimpan aman di server Supabase.</p>
@@ -752,8 +778,8 @@ function renderProfileScreen() {
 }
 
 async function handleSignUp() {
-  const email = document.getElementById('auth-email').value.trim();
-  const password = document.getElementById('auth-password').value.trim();
+  const email = document.getElementById('auth-email')?.value.trim();
+  const password = document.getElementById('auth-password')?.value.trim();
   if (!email || !password) {
     showToast('Harap isi email dan password', 'error');
     return;
@@ -770,8 +796,8 @@ async function handleSignUp() {
 }
 
 async function handleSignIn() {
-  const email = document.getElementById('auth-email').value.trim();
-  const password = document.getElementById('auth-password').value.trim();
+  const email = document.getElementById('auth-email')?.value.trim();
+  const password = document.getElementById('auth-password')?.value.trim();
   if (!email || !password) {
     showToast('Harap isi email dan password', 'error');
     return;
@@ -794,9 +820,9 @@ async function handleSignOut() {
 }
 
 function saveApiSettings() {
-  const url = document.getElementById('cfg-supa-url').value;
-  const supaKey = document.getElementById('cfg-supa-key').value;
-  const geminiKey = document.getElementById('cfg-gemini-key').value;
+  const url = document.getElementById('cfg-supa-url')?.value;
+  const supaKey = document.getElementById('cfg-supa-key')?.value;
+  const geminiKey = document.getElementById('cfg-gemini-key')?.value;
 
   SlancarConfig.saveConfig(url, supaKey, geminiKey);
   initSupabase();
@@ -806,11 +832,11 @@ function saveApiSettings() {
 
 async function saveProfileSettings() {
   const updated = {
-    wake_up_time: document.getElementById('prof-wake').value,
-    sleep_time: document.getElementById('prof-sleep').value,
-    office_start_time: document.getElementById('prof-office-start').value,
-    office_end_time: document.getElementById('prof-office-end').value,
-    daily_capacity_hours: parseFloat(document.getElementById('prof-capacity').value) || 8.0
+    wake_up_time: document.getElementById('prof-wake')?.value || '06:00',
+    sleep_time: document.getElementById('prof-sleep')?.value || '22:00',
+    office_start_time: document.getElementById('prof-office-start')?.value || '09:00',
+    office_end_time: document.getElementById('prof-office-end')?.value || '17:00',
+    daily_capacity_hours: parseFloat(document.getElementById('prof-capacity')?.value) || 8.0
   };
 
   await SlancarDB.updateProfile(AppState.user?.id, updated);
@@ -842,7 +868,7 @@ function openModal(id) {
   const el = document.getElementById(id);
   if (el) {
     el.classList.add('active');
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 }
 
@@ -853,15 +879,15 @@ function closeModal(id) {
 
 // Task Creator with Custom Type & Priority Override
 async function handleCreateTask(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   try {
-    const title = document.getElementById('new-task-title').value.trim();
-    const typeSelect = document.getElementById('new-task-type').value;
+    const title = document.getElementById('new-task-title')?.value.trim();
+    const typeSelect = document.getElementById('new-task-type')?.value || 'side_hustle';
     const customTypeName = document.getElementById('new-task-custom-name')?.value?.trim() || '';
     const customBaseScore = document.getElementById('new-task-custom-score')?.value || 70;
-    const hours = parseFloat(document.getElementById('new-task-hours').value) || 1.0;
-    const deadlineType = document.getElementById('new-task-deadline-type').value;
-    const deadlineDate = document.getElementById('new-task-deadline-date').value || null;
+    const hours = parseFloat(document.getElementById('new-task-hours')?.value) || 1.0;
+    const deadlineType = document.getElementById('new-task-deadline-type')?.value || 'soft';
+    const deadlineDate = document.getElementById('new-task-deadline-date')?.value || null;
     const priorityOverride = document.getElementById('new-task-priority-override')?.value || null;
 
     if (!title) {
@@ -886,6 +912,10 @@ async function handleCreateTask(e) {
     await SlancarDB.createTask(taskPayload);
     AppState.tasks = await SlancarDB.getTasks(AppState.user?.id);
 
+    // Reset Form Input
+    const titleInput = document.getElementById('new-task-title');
+    if (titleInput) titleInput.value = '';
+
     closeModal('task-modal');
     showToast('Tugas berhasil ditambahkan ke Backlog!');
     renderApp();
@@ -897,11 +927,11 @@ async function handleCreateTask(e) {
 
 // Goal Creator
 async function handleCreateGoal(e) {
-  e.preventDefault();
+  if (e && e.preventDefault) e.preventDefault();
   try {
-    const title = document.getElementById('new-goal-title').value.trim();
-    const target = parseFloat(document.getElementById('new-goal-target').value) || 100;
-    const metric = document.getElementById('new-goal-metric').value.trim() || 'Unit';
+    const title = document.getElementById('new-goal-title')?.value.trim();
+    const target = parseFloat(document.getElementById('new-goal-target')?.value) || 100;
+    const metric = document.getElementById('new-goal-metric')?.value.trim() || 'Unit';
 
     if (!title) {
       showToast('Judul Goal harus diisi', 'error');
@@ -916,6 +946,10 @@ async function handleCreateGoal(e) {
     });
 
     AppState.goals = await SlancarDB.getGoals(AppState.user?.id);
+
+    const goalInput = document.getElementById('new-goal-title');
+    if (goalInput) goalInput.value = '';
+
     closeModal('goal-modal');
     showToast('Goal berhasil dibuat!');
     renderApp();

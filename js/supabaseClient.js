@@ -1,18 +1,49 @@
 // ==================================================
 // SLANCAR SUPABASE CLIENT & DATA LAYER
-// Resilient Cloud + Local Storage Sync
+// Resilient, Self-Contained, Zero-Dependency Data Layer
 // ==================================================
 
 let supabase = null;
+let currentUser = null;
+
+// Safe Local Storage Helpers (Never Crash)
+function safeGetJSON(key, defaultVal) {
+  try {
+    const item = localStorage.getItem(key);
+    return item ? JSON.parse(item) : defaultVal;
+  } catch (e) {
+    return defaultVal;
+  }
+}
+
+function safeSetJSON(key, val) {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch (e) {
+    console.warn('Storage write warning:', e);
+  }
+}
 
 function initSupabase() {
   if (SlancarConfig.isConfigured() && window.supabase) {
     try {
       supabase = window.supabase.createClient(SlancarConfig.SUPABASE_URL, SlancarConfig.SUPABASE_ANON_KEY);
-      console.log('✅ Supabase initialized successfully');
+      
+      // Auto-listen to auth state changes
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        currentUser = session?.user || null;
+        if (window.AppState) window.AppState.user = currentUser;
+      }).catch(() => {});
+
+      supabase.auth.onAuthStateChange((_event, session) => {
+        currentUser = session?.user || null;
+        if (window.AppState) window.AppState.user = currentUser;
+      });
+
+      console.log('✅ Supabase client initialized');
       return true;
     } catch (e) {
-      console.error('Failed to init Supabase:', e);
+      console.warn('Supabase init warning:', e);
       return false;
     }
   }
@@ -21,17 +52,21 @@ function initSupabase() {
 
 const SlancarDB = {
   isCloudReady() {
-    return Boolean(supabase && AppState.user && AppState.user.id);
+    return Boolean(supabase && currentUser && currentUser.id);
+  },
+
+  getCurrentUser() {
+    return currentUser;
   },
 
   async getUser() {
-    if (!supabase) return null;
+    if (!supabase) return currentUser;
     try {
-      const { data: { user }, error } = await supabase.auth.getUser();
-      if (error) return null;
-      return user;
+      const { data: { user } } = await supabase.auth.getUser();
+      currentUser = user || null;
+      return currentUser;
     } catch (e) {
-      return null;
+      return currentUser;
     }
   },
 
@@ -43,34 +78,28 @@ const SlancarDB = {
       options: { data: { full_name: fullName } }
     });
     if (error) throw error;
-    return data.user;
+    currentUser = data.user;
+    return currentUser;
   },
 
   async signIn(email, password) {
     if (!supabase) throw new Error('Supabase URL & Anon Key belum diatur di menu Profile');
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
-    return data.user;
+    currentUser = data.user;
+    return currentUser;
   },
 
   async signOut() {
     if (supabase) {
-      await supabase.auth.signOut();
+      try { await supabase.auth.signOut(); } catch (e) {}
     }
-    AppState.user = null;
-    localStorage.removeItem('slancar_user_cached');
+    currentUser = null;
+    if (window.AppState) window.AppState.user = null;
   },
 
   async getProfile(userId) {
-    if (this.isCloudReady() && userId) {
-      try {
-        const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
-        if (data) return data;
-      } catch (e) {
-        console.warn('Could not fetch cloud profile, using local fallback:', e);
-      }
-    }
-    return JSON.parse(localStorage.getItem('slancar_local_profile')) || {
+    const defaultProfile = {
       full_name: 'Solo Creator',
       wake_up_time: '06:00',
       sleep_time: '22:00',
@@ -81,31 +110,31 @@ const SlancarDB = {
       income_target: 20000000,
       learning_target: 'Belajar 30m tiap hari'
     };
+
+    if (this.isCloudReady() && userId) {
+      try {
+        const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+        if (data) return data;
+      } catch (e) {
+        console.warn('Cloud profile fetch warning:', e);
+      }
+    }
+    return safeGetJSON('slancar_local_profile', defaultProfile);
   },
 
   async updateProfile(userId, profileData) {
-    localStorage.setItem('slancar_local_profile', JSON.stringify(profileData));
+    safeSetJSON('slancar_local_profile', profileData);
     if (this.isCloudReady() && userId) {
       try {
-        const { data, error } = await supabase.from('profiles').update(profileData).eq('id', userId).select().single();
+        const { data } = await supabase.from('profiles').update(profileData).eq('id', userId).select().single();
         if (data) return data;
-      } catch (e) {
-        console.warn('Cloud profile update failed, saved locally:', e);
-      }
+      } catch (e) {}
     }
     return profileData;
   },
 
   async getGoals(userId) {
-    if (this.isCloudReady() && userId) {
-      try {
-        const { data, error } = await supabase.from('goals').select('*').eq('user_id', userId).order('created_at', { ascending: false });
-        if (data && data.length > 0) return data;
-      } catch (e) {
-        console.warn('Could not fetch cloud goals, using local:', e);
-      }
-    }
-    return JSON.parse(localStorage.getItem('slancar_local_goals')) || [
+    const defaultGoals = [
       {
         id: 'goal-1',
         title: 'Target Penghasilan Rp20,000,000/bulan',
@@ -137,6 +166,14 @@ const SlancarDB = {
         milestones: [{ title: 'Sesi Senin (Chest & Triceps)', done: true }, { title: 'Sesi Rabu (Back & Biceps)', done: true }]
       }
     ];
+
+    if (this.isCloudReady() && userId) {
+      try {
+        const { data, error } = await supabase.from('goals').select('*').eq('user_id', userId).order('created_at', { ascending: false });
+        if (data && data.length > 0) return data;
+      } catch (e) {}
+    }
+    return safeGetJSON('slancar_local_goals', defaultGoals);
   },
 
   async createGoal(goalData) {
@@ -150,37 +187,29 @@ const SlancarDB = {
       created_at: new Date().toISOString()
     };
 
-    if (this.isCloudReady() && AppState.user?.id) {
+    if (this.isCloudReady() && currentUser?.id) {
       try {
-        const { data, error } = await supabase.from('goals').insert({
+        const { data } = await supabase.from('goals').insert({
           ...goalData,
-          user_id: AppState.user.id
+          user_id: currentUser.id
         }).select().single();
         if (data) {
           goals.unshift(data);
-          localStorage.setItem('slancar_local_goals', JSON.stringify(goals));
+          safeSetJSON('slancar_local_goals', goals);
           return data;
         }
       } catch (e) {
-        console.warn('Could not save goal to cloud, saving locally:', e);
+        console.warn('Cloud save goal failed, saved locally:', e);
       }
     }
 
     goals.unshift(newGoal);
-    localStorage.setItem('slancar_local_goals', JSON.stringify(goals));
+    safeSetJSON('slancar_local_goals', goals);
     return newGoal;
   },
 
   async getTasks(userId) {
-    if (this.isCloudReady() && userId) {
-      try {
-        const { data, error } = await supabase.from('tasks').select('*').eq('user_id', userId).order('priority_score', { ascending: false });
-        if (data && data.length > 0) return data;
-      } catch (e) {
-        console.warn('Could not fetch cloud tasks, using local:', e);
-      }
-    }
-    return JSON.parse(localStorage.getItem('slancar_local_tasks')) || [
+    const defaultTasks = [
       {
         id: 'task-1',
         title: 'Office: Q4 Sprint Review Slides',
@@ -226,6 +255,14 @@ const SlancarDB = {
         status: 'todo'
       }
     ];
+
+    if (this.isCloudReady() && userId) {
+      try {
+        const { data } = await supabase.from('tasks').select('*').eq('user_id', userId).order('priority_score', { ascending: false });
+        if (data && data.length > 0) return data;
+      } catch (e) {}
+    }
+    return safeGetJSON('slancar_local_tasks', defaultTasks);
   },
 
   async createTask(taskData) {
@@ -237,24 +274,24 @@ const SlancarDB = {
       created_at: new Date().toISOString()
     };
 
-    if (this.isCloudReady() && AppState.user?.id) {
+    if (this.isCloudReady() && currentUser?.id) {
       try {
-        const { data, error } = await supabase.from('tasks').insert({
+        const { data } = await supabase.from('tasks').insert({
           ...taskData,
-          user_id: AppState.user.id
+          user_id: currentUser.id
         }).select().single();
         if (data) {
           tasks.unshift(data);
-          localStorage.setItem('slancar_local_tasks', JSON.stringify(tasks));
+          safeSetJSON('slancar_local_tasks', tasks);
           return data;
         }
       } catch (e) {
-        console.warn('Could not save task to cloud, saving locally:', e);
+        console.warn('Cloud save task failed, saved locally:', e);
       }
     }
 
     tasks.unshift(newTask);
-    localStorage.setItem('slancar_local_tasks', JSON.stringify(tasks));
+    safeSetJSON('slancar_local_tasks', tasks);
     return newTask;
   },
 
@@ -262,14 +299,12 @@ const SlancarDB = {
     const tasks = await this.getTasks();
     const task = tasks.find(t => t.id === taskId);
     if (task) task.status = status;
-    localStorage.setItem('slancar_local_tasks', JSON.stringify(tasks));
+    safeSetJSON('slancar_local_tasks', tasks);
 
-    if (this.isCloudReady() && AppState.user?.id) {
+    if (this.isCloudReady() && currentUser?.id) {
       try {
         await supabase.from('tasks').update({ status }).eq('id', taskId);
-      } catch (e) {
-        console.warn('Cloud task status update failed:', e);
-      }
+      } catch (e) {}
     }
     return task;
   },
@@ -279,43 +314,37 @@ const SlancarDB = {
       try {
         const { data } = await supabase.from('daily_plans').select('*').eq('user_id', userId).eq('plan_date', dateStr).maybeSingle();
         if (data) return data;
-      } catch (e) {
-        console.warn('Could not fetch cloud plan:', e);
-      }
+      } catch (e) {}
     }
-    return JSON.parse(localStorage.getItem('slancar_today_plan')) || null;
+    return safeGetJSON('slancar_today_plan', null);
   },
 
   async saveDailyPlan(planData) {
-    localStorage.setItem('slancar_today_plan', JSON.stringify(planData));
+    safeSetJSON('slancar_today_plan', planData);
 
-    if (this.isCloudReady() && AppState.user?.id) {
+    if (this.isCloudReady() && currentUser?.id) {
       try {
         const { data } = await supabase.from('daily_plans').upsert({
           ...planData,
-          user_id: AppState.user.id
+          user_id: currentUser.id
         }, { onConflict: 'user_id,plan_date' }).select().single();
         if (data) return data;
-      } catch (e) {
-        console.warn('Could not save plan to cloud, saved locally:', e);
-      }
+      } catch (e) {}
     }
     return planData;
   },
 
   async saveDailyReview(reviewData) {
-    localStorage.setItem('slancar_last_review', JSON.stringify(reviewData));
+    safeSetJSON('slancar_last_review', reviewData);
 
-    if (this.isCloudReady() && AppState.user?.id) {
+    if (this.isCloudReady() && currentUser?.id) {
       try {
         const { data } = await supabase.from('daily_reviews').upsert({
           ...reviewData,
-          user_id: AppState.user.id
+          user_id: currentUser.id
         }, { onConflict: 'user_id,review_date' }).select().single();
         if (data) return data;
-      } catch (e) {
-        console.warn('Could not save review to cloud, saved locally:', e);
-      }
+      } catch (e) {}
     }
     return reviewData;
   }
