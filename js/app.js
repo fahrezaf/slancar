@@ -18,10 +18,30 @@ const AppState = {
 
 // Initialize App
 document.addEventListener('DOMContentLoaded', async () => {
+  // 1. Initial Instant Render with defaults so screen is NEVER blank
   initSupabase();
-  await loadAppData();
+  AppState.profile = JSON.parse(localStorage.getItem('slancar_local_profile')) || {
+    full_name: 'Solo Creator',
+    daily_capacity_hours: 8.0,
+    buffer_percentage: 0.15,
+    office_start_time: '09:00',
+    office_end_time: '17:00'
+  };
+  AppState.tasks = JSON.parse(localStorage.getItem('slancar_local_tasks')) || [];
+  AppState.goals = JSON.parse(localStorage.getItem('slancar_local_goals')) || [];
+  
   renderApp();
   lucide.createIcons();
+
+  // 2. Load fresh data from Cloud/Storage in background
+  try {
+    await loadAppData();
+  } catch (e) {
+    console.warn('Background sync error, using cached data:', e);
+  } finally {
+    renderApp();
+    lucide.createIcons();
+  }
 });
 
 // Load All Core Data
@@ -30,44 +50,52 @@ async function loadAppData() {
     AppState.user = await SlancarDB.getUser();
     AppState.profile = await SlancarDB.getProfile(AppState.user?.id);
     AppState.goals = await SlancarDB.getGoals(AppState.user?.id);
-    AppState.projects = await SlancarDB.getProjects(AppState.user?.id);
     AppState.tasks = await SlancarDB.getTasks(AppState.user?.id);
 
     const todayStr = new Date().toISOString().split('T')[0];
     AppState.todayPlan = await SlancarDB.getDailyPlan(AppState.user?.id, todayStr);
 
-    // If today's plan doesn't exist yet, run the 06:00 Decision Engine auto-builder!
+    // If today's plan doesn't exist yet, auto-build using Decision Engine
     if (!AppState.todayPlan) {
       await runMorningPlanning(false);
     }
   } catch (err) {
-    console.error('Error loading app data:', err);
+    console.error('Error in loadAppData:', err);
   }
 }
 
 // 06:00 Daily Planning Execution
 async function runMorningPlanning(forceReplan = false) {
-  if (AppState.todayPlan && !forceReplan) return;
+  try {
+    if (AppState.todayPlan && !forceReplan) return;
 
-  const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
-  const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
+    const evaluation = SlancarDecisionEngine.evaluateDayPlan(AppState.profile, AppState.tasks);
+    const slots = SlancarDecisionEngine.generateScheduleSlots(AppState.profile, evaluation.scheduledTasks);
 
-  // Generate PM Strategic Reason via Gemini 1.5 Flash
-  const pmReasoning = await SlancarAI.synthesizeMorningPlan(AppState.profile, evaluation, slots);
+    // Generate PM Strategic Reason
+    const pmReasoning = await SlancarAI.synthesizeMorningPlan(AppState.profile, evaluation, slots);
 
-  const todayStr = new Date().toISOString().split('T')[0];
-  const newPlan = {
-    user_id: AppState.user?.id || 'demo-user',
-    plan_date: todayStr,
-    target_capacity_hours: evaluation.rawCapacity,
-    allocated_hours: evaluation.allocatedHours,
-    schedule_slots: slots,
-    pm_reasoning: pmReasoning,
-    status: 'active'
-  };
+    const todayStr = new Date().toISOString().split('T')[0];
+    const newPlan = {
+      plan_date: todayStr,
+      target_capacity_hours: evaluation.rawCapacity,
+      allocated_hours: evaluation.allocatedHours,
+      schedule_slots: slots,
+      pm_reasoning: pmReasoning,
+      status: 'active'
+    };
 
-  AppState.todayPlan = await SlancarDB.saveDailyPlan(newPlan);
-  renderApp();
+    AppState.todayPlan = await SlancarDB.saveDailyPlan(newPlan);
+    renderApp();
+    lucide.createIcons();
+
+    if (forceReplan) {
+      showToast('Jadwal hari ini berhasil dikalkulasi ulang!');
+    }
+  } catch (e) {
+    console.error('Failed to run morning planning:', e);
+    showToast('Terjadi kesalahan saat mengalkulasi jadwal.', 'error');
+  }
 }
 
 // Switch Screens
@@ -84,6 +112,18 @@ function navigateTo(tabName) {
 // Master Render
 function renderApp() {
   renderScreenContent();
+  lucide.createIcons();
+}
+
+// Toast notification helper
+function showToast(message, type = 'success') {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.innerText = message;
+  toast.className = `toast show ${type === 'error' ? 'bg-rose-600' : 'bg-indigo-600'}`;
+  setTimeout(() => {
+    toast.className = 'toast';
+  }, 3000);
 }
 
 // Render active screen
@@ -97,9 +137,6 @@ function renderScreenContent() {
       break;
     case 'goals':
       container.innerHTML = renderGoalsScreen();
-      break;
-    case 'projects':
-      container.innerHTML = renderProjectsScreen();
       break;
     case 'tasks':
       container.innerHTML = renderTasksScreen();
@@ -116,7 +153,6 @@ function renderScreenContent() {
     default:
       container.innerHTML = renderDashboardScreen();
   }
-  lucide.createIcons();
 }
 
 // ==========================================
@@ -127,12 +163,11 @@ function renderDashboardScreen() {
   const currentSlot = slots[0] || null;
   const rawCap = parseFloat(AppState.profile?.daily_capacity_hours) || 8.0;
   const alloc = parseFloat(AppState.todayPlan?.allocated_hours) || 0.0;
-  const buffer = rawCap - alloc;
+  const buffer = Math.max(0, rawCap - alloc);
   const allocPercent = Math.min(Math.round((alloc / rawCap) * 100), 100);
 
-  // Check Overdue Tasks
   const today = new Date().setHours(0,0,0,0);
-  const overdueTasks = AppState.tasks.filter(t => t.status !== 'completed' && t.deadline_date && new Date(t.deadline_date) < today);
+  const overdueTasks = (AppState.tasks || []).filter(t => t.status !== 'completed' && t.deadline_date && new Date(t.deadline_date) < today);
 
   return `
     <div class="p-4 space-y-4">
@@ -142,28 +177,28 @@ function renderDashboardScreen() {
           <p class="text-xs text-gray-400 font-medium">SLANCAR PM • ${new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'short' })}</p>
           <h1 class="text-xl font-bold text-white tracking-tight">Today's Focus</h1>
         </div>
-        <button onclick="navigateTo('profile')" class="w-9 h-9 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-cyan-400">
+        <button onclick="navigateTo('profile')" class="w-9 h-9 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-cyan-400 hover:bg-slate-700 transition">
           <i data-lucide="user" class="w-4 h-4"></i>
         </button>
       </div>
 
-      <!-- Overdue Alert (if exists) -->
+      <!-- Overdue Alert -->
       ${overdueTasks.length > 0 ? `
         <div class="bg-rose-950/40 border border-rose-800/60 rounded-xl p-3 flex items-center gap-3">
           <i data-lucide="alert-triangle" class="w-5 h-5 text-rose-400 shrink-0"></i>
           <div class="flex-1 text-xs">
             <span class="font-bold text-rose-300">${overdueTasks.length} Tugas Overdue!</span>
-            <p class="text-rose-200/80">Prioritas telah otomatis dinaikkan ke level maksimal.</p>
+            <p class="text-rose-200/80">Prioritas dinaikkan ke level maksimal otomatis.</p>
           </div>
           <button onclick="navigateTo('tasks')" class="text-xs bg-rose-600 px-2.5 py-1 rounded-lg text-white font-medium">Lihat</button>
         </div>
       ` : ''}
 
-      <!-- HERO: "WHAT SHOULD I DO RIGHT NOW?" -->
+      <!-- HERO: WHAT SHOULD I DO RIGHT NOW? -->
       <div class="sl-card hero-glow p-5">
         <div class="flex items-center justify-between mb-2">
           <span class="text-xs font-semibold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span> Sedang Dikerjakan Sekarang
+            <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span> Fokus Sekarang
           </span>
           <span class="text-xs text-gray-400 font-mono">${currentSlot ? `${currentSlot.start_time} - ${currentSlot.end_time}` : 'Free'}</span>
         </div>
@@ -173,7 +208,7 @@ function renderDashboardScreen() {
         </h2>
         
         <p class="text-xs text-gray-400 mb-4">
-          ${currentSlot ? `Estimasi: ${currentSlot.estimated_hours} Jam • Tipe: ${currentSlot.task_type.replace('_', ' ').toUpperCase()}` : 'Buffer kapasitas harianmu tetap aman terjaga.'}
+          ${currentSlot ? `Estimasi: ${currentSlot.estimated_hours} Jam • Tipe: ${String(currentSlot.task_type).toUpperCase()}` : 'Buffer kapasitas harianmu tetap aman terjaga.'}
         </p>
 
         ${currentSlot ? `
@@ -186,7 +221,7 @@ function renderDashboardScreen() {
             </button>
           </div>
         ` : `
-          <button onclick="runMorningPlanning(true)" class="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2 px-4 rounded-xl text-xs flex items-center justify-center gap-1.5">
+          <button onclick="runMorningPlanning(true)" class="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-1.5">
             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Re-Calculate Jadwal Hari Ini
           </button>
         `}
@@ -232,12 +267,17 @@ function renderDashboardScreen() {
       <div>
         <div class="flex justify-between items-center mb-3">
           <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Jadwal Jam demi Jam</h3>
-          <span class="text-xs text-gray-500">${slots.length} Tugas Terpilih</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-500">${slots.length} Tugas Terpilih</span>
+            <button onclick="runMorningPlanning(true)" class="text-xs text-cyan-400 hover:underline flex items-center gap-1">
+              <i data-lucide="refresh-cw" class="w-3 h-3"></i> Re-plan
+            </button>
+          </div>
         </div>
 
         <div class="space-y-2.5">
           ${slots.length === 0 ? `
-            <div class="text-center py-8 text-gray-500 text-xs">Belum ada tugas terjadwal hari ini.</div>
+            <div class="text-center py-8 text-gray-500 text-xs">Belum ada tugas terjadwal hari ini. Tambahkan tugas di menu Tasks.</div>
           ` : slots.map((s, idx) => `
             <div class="sl-card flex items-center gap-3 py-3 px-4 ${idx === 0 ? 'border-cyan-500/50 bg-slate-900/90' : ''}">
               <div class="text-center w-12 shrink-0">
@@ -248,7 +288,7 @@ function renderDashboardScreen() {
               <div class="flex-1 min-w-0">
                 <h4 class="text-xs font-medium text-white truncate">${s.task_title}</h4>
                 <div class="flex items-center gap-2 mt-0.5">
-                  <span class="text-[10px] px-1.5 py-0.5 rounded badge-${s.task_type.split('_')[0]}">${s.task_type.replace('_', ' ')}</span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded badge-side">${String(s.task_type).replace('_', ' ')}</span>
                   <span class="text-[10px] text-gray-500">${s.estimated_hours}h</span>
                 </div>
               </div>
@@ -280,7 +320,7 @@ function renderGoalsScreen() {
       </div>
 
       <div class="space-y-3">
-        ${AppState.goals.map(g => {
+        ${(AppState.goals || []).map(g => {
           const milestones = Array.isArray(g.milestones) ? g.milestones : [];
           return `
             <div class="sl-card space-y-3">
@@ -294,18 +334,16 @@ function renderGoalsScreen() {
                 <span class="text-xs font-mono font-bold text-cyan-400">${Math.round(g.progress || 0)}%</span>
               </div>
 
-              <!-- Progress bar -->
               <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                 <div class="bg-cyan-400 h-full" style="width: ${g.progress || 0}%"></div>
               </div>
 
-              <!-- Milestones Checklist -->
               ${milestones.length > 0 ? `
                 <div class="pt-2 border-t border-slate-800/80 space-y-1.5">
                   <span class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider block">Milestones:</span>
-                  ${milestones.map((m, mIdx) => `
+                  ${milestones.map((m) => `
                     <div class="flex items-center gap-2 text-xs text-gray-300">
-                      <input type="checkbox" ${m.done ? 'checked' : ''} onchange="toggleMilestone('${g.id}', ${mIdx})" class="rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0">
+                      <i data-lucide="${m.done ? 'check-circle' : 'circle'}" class="w-3.5 h-3.5 ${m.done ? 'text-emerald-400' : 'text-gray-500'}"></i>
                       <span class="${m.done ? 'line-through text-gray-500' : ''}">${m.title}</span>
                     </div>
                   `).join('')}
@@ -320,65 +358,22 @@ function renderGoalsScreen() {
 }
 
 // ==========================================
-// 3. PROJECTS SCREEN
-// ==========================================
-function renderProjectsScreen() {
-  return `
-    <div class="p-4 space-y-4">
-      <div class="flex items-center justify-between pt-2">
-        <div>
-          <p class="text-xs text-gray-400 font-medium">EXECUTION INITIATIVES</p>
-          <h1 class="text-xl font-bold text-white tracking-tight">Active Projects</h1>
-        </div>
-        <button onclick="openModal('project-modal')" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-lg shadow-indigo-600/30">
-          <i data-lucide="plus" class="w-4 h-4"></i> Tambah Proyek
-        </button>
-      </div>
-
-      <div class="space-y-3">
-        ${AppState.projects.map(p => {
-          const projectTasks = AppState.tasks.filter(t => t.project_id === p.id);
-          const completedTasks = projectTasks.filter(t => t.status === 'completed');
-          const percent = projectTasks.length > 0 ? Math.round((completedTasks.length / projectTasks.length) * 100) : 0;
-
-          return `
-            <div class="sl-card space-y-2">
-              <div class="flex justify-between items-start">
-                <div>
-                  <h3 class="text-sm font-bold text-white">${p.title}</h3>
-                  <p class="text-xs text-gray-400">${p.description || 'Tidak ada deskripsi'}</p>
-                </div>
-                <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-gray-300 font-mono">${completedTasks.length}/${projectTasks.length} Tugas</span>
-              </div>
-              
-              <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                <div class="bg-indigo-500 h-full" style="width: ${percent}%"></div>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    </div>
-  `;
-}
-
-// ==========================================
-// 4. TASKS SCREEN (Backlog & Priority Scores)
+// 3. TASKS SCREEN (Custom Types & Priority)
 // ==========================================
 let currentTaskFilter = 'all';
 
 function renderTasksScreen() {
   const filteredTasks = currentTaskFilter === 'all'
-    ? AppState.tasks
-    : AppState.tasks.filter(t => t.task_type === currentTaskFilter);
+    ? (AppState.tasks || [])
+    : (AppState.tasks || []).filter(t => t.task_type === currentTaskFilter || t.custom_type_name === currentTaskFilter);
 
   const filterTabs = [
     { id: 'all', label: 'Semua' },
-    { id: 'office_work', label: 'Office' },
-    { id: 'client_freelance', label: 'Freelance' },
-    { id: 'side_hustle', label: 'Side Hustle' },
-    { id: 'gym', label: 'Gym' },
-    { id: 'learning', label: 'Learning' }
+    { id: 'office_work', label: 'Office (100)' },
+    { id: 'client_freelance', label: 'Freelance (90)' },
+    { id: 'side_hustle', label: 'Side Hustle (80)' },
+    { id: 'gym', label: 'Gym (60)' },
+    { id: 'learning', label: 'Learning (30)' }
   ];
 
   return `
@@ -404,18 +399,24 @@ function renderTasksScreen() {
 
       <!-- Task List sorted by Priority Score -->
       <div class="space-y-2.5">
-        ${filteredTasks.map(t => {
-          const score = t.priority_score || SlancarDecisionEngine.calculateScore(t);
+        ${filteredTasks.length === 0 ? `
+          <div class="text-center py-12 text-gray-500 text-xs">Belum ada tugas di kategori ini. Klik '+ Buat Tugas'.</div>
+        ` : filteredTasks.map(t => {
+          const score = SlancarDecisionEngine.calculateScore(t);
           const isDone = t.status === 'completed';
+          const typeName = t.custom_type_name || t.task_type.replace('_', ' ');
 
           return `
             <div class="sl-card flex items-start gap-3 p-3.5 ${isDone ? 'opacity-50' : ''}">
               <input type="checkbox" ${isDone ? 'checked' : ''} onchange="toggleTaskDone('${t.id}')" class="mt-1 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0">
               
               <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="text-[10px] font-bold font-mono px-2 py-0.5 rounded ${score >= 100 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-slate-800 text-gray-300'}">
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                  <span class="text-[10px] font-bold font-mono px-2 py-0.5 rounded ${score >= 100 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-slate-800 text-cyan-300'}">
                     PRIORITY: ${score}
+                  </span>
+                  <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-gray-300 capitalize font-medium">
+                    ${typeName}
                   </span>
                   ${t.deadline_type === 'hard' ? `
                     <span class="text-[10px] font-semibold text-rose-400 uppercase tracking-wider flex items-center gap-1">
@@ -443,10 +444,11 @@ function renderTasksScreen() {
 function setTaskFilter(type) {
   currentTaskFilter = type;
   renderScreenContent();
+  lucide.createIcons();
 }
 
 // ==========================================
-// 5. PM CHAT SCREEN (Active Guidance)
+// 4. PM CHAT SCREEN (Active Guidance)
 // ==========================================
 function renderPMChatScreen() {
   const quickChips = [
@@ -464,7 +466,6 @@ function renderPMChatScreen() {
           <h1 class="text-xl font-bold text-white tracking-tight">AI Project Manager</h1>
         </div>
 
-        <!-- Quick Action Chips -->
         <div class="flex gap-2 overflow-x-auto pb-2 mb-3 no-scrollbar">
           ${quickChips.map(chip => `
             <button onclick="sendQuickChatMessage('${chip}')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-gray-300 whitespace-nowrap border border-slate-700 transition">
@@ -473,7 +474,6 @@ function renderPMChatScreen() {
           `).join('')}
         </div>
 
-        <!-- Messages Stream -->
         <div id="chat-stream" class="space-y-3 overflow-y-auto max-h-[55vh] pr-1">
           ${AppState.chatMessages.map(msg => `
             <div class="flex gap-2.5 ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}">
@@ -490,7 +490,6 @@ function renderPMChatScreen() {
         </div>
       </div>
 
-      <!-- Chat Input -->
       <form onsubmit="handleSendChat(event)" class="flex gap-2 pt-3 border-t border-slate-800">
         <input id="chat-input" type="text" placeholder="Diskusikan prioritas atau beban kerja..." class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
         <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2.5 rounded-xl text-xs font-medium transition flex items-center justify-center">
@@ -510,10 +509,12 @@ async function handleSendChat(e) {
   AppState.chatMessages.push({ sender: 'user', text });
   input.value = '';
   renderScreenContent();
+  lucide.createIcons();
 
   const pmReply = await SlancarAI.chatWithPM(text, AppState.todayPlan, AppState.tasks);
   AppState.chatMessages.push({ sender: 'pm', text: pmReply });
   renderScreenContent();
+  lucide.createIcons();
 }
 
 function sendQuickChatMessage(text) {
@@ -522,11 +523,11 @@ function sendQuickChatMessage(text) {
 }
 
 // ==========================================
-// 6. DAILY REVIEW SCREEN (21:00 Evening Review)
+// 5. DAILY REVIEW SCREEN (21:00 Evening Review)
 // ==========================================
 function renderDailyReviewScreen() {
-  const completed = AppState.tasks.filter(t => t.status === 'completed');
-  const failed = AppState.tasks.filter(t => t.status !== 'completed');
+  const completed = (AppState.tasks || []).filter(t => t.status === 'completed');
+  const failed = (AppState.tasks || []).filter(t => t.status !== 'completed');
 
   return `
     <div class="p-4 space-y-4">
@@ -537,7 +538,6 @@ function renderDailyReviewScreen() {
       </div>
 
       <div class="sl-card space-y-4">
-        <!-- Status summary -->
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-slate-900/80 p-3 rounded-xl border border-slate-800 text-center">
             <span class="text-xl font-bold text-emerald-400 font-mono">${completed.length}</span>
@@ -549,7 +549,6 @@ function renderDailyReviewScreen() {
           </div>
         </div>
 
-        <!-- Energy Level Slider -->
         <div>
           <label class="block text-xs font-semibold text-gray-300 mb-1.5">Tingkat Energi Malam Ini (1 - 5):</label>
           <div class="flex items-center gap-3">
@@ -558,7 +557,6 @@ function renderDailyReviewScreen() {
           </div>
         </div>
 
-        <!-- Mood Selection -->
         <div>
           <label class="block text-xs font-semibold text-gray-300 mb-1.5">Suasana Hati (Mood):</label>
           <select id="review-mood" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
@@ -569,7 +567,6 @@ function renderDailyReviewScreen() {
           </select>
         </div>
 
-        <!-- Reflection Notes -->
         <div>
           <label class="block text-xs font-semibold text-gray-300 mb-1.5">Apa kendala atau pelajaran utama hari ini?</label>
           <textarea id="review-notes" rows="3" placeholder="Contoh: Terlalu lama di revisi klien, kurang istirahat siang..." class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-indigo-500"></textarea>
@@ -580,7 +577,6 @@ function renderDailyReviewScreen() {
         </button>
       </div>
 
-      <!-- Display PM Feedback result if already submitted -->
       <div id="pm-feedback-box" class="hidden sl-card border-indigo-500/40 bg-indigo-950/30 p-4">
         <h4 class="text-xs font-bold text-indigo-300 uppercase tracking-wide mb-2">Sintesis PM untuk Besok:</h4>
         <p id="pm-feedback-text" class="text-xs text-gray-200 leading-relaxed"></p>
@@ -590,41 +586,48 @@ function renderDailyReviewScreen() {
 }
 
 async function submitDailyReview() {
-  const energy = parseInt(document.getElementById('review-energy').value, 10);
-  const mood = document.getElementById('review-mood').value;
-  const notes = document.getElementById('review-notes').value;
+  try {
+    const energy = parseInt(document.getElementById('review-energy').value, 10);
+    const mood = document.getElementById('review-mood').value;
+    const notes = document.getElementById('review-notes').value;
 
-  const completed = AppState.tasks.filter(t => t.status === 'completed');
-  const failed = AppState.tasks.filter(t => t.status !== 'completed');
+    const completed = (AppState.tasks || []).filter(t => t.status === 'completed');
+    const failed = (AppState.tasks || []).filter(t => t.status !== 'completed');
 
-  const pmFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
+    const pmFeedback = await SlancarAI.synthesizeEveningReview(completed, failed, energy, mood, notes);
 
-  const todayStr = new Date().toISOString().split('T')[0];
-  await SlancarDB.saveDailyReview({
-    user_id: AppState.user?.id || 'demo-user',
-    review_date: todayStr,
-    completed_tasks_count: completed.length,
-    failed_tasks_count: failed.length,
-    reasons: notes,
-    energy_level: energy,
-    mood: mood,
-    productive_hours: parseFloat(AppState.todayPlan?.allocated_hours) || 6.0,
-    pm_feedback: pmFeedback
-  });
+    const todayStr = new Date().toISOString().split('T')[0];
+    await SlancarDB.saveDailyReview({
+      review_date: todayStr,
+      completed_tasks_count: completed.length,
+      failed_tasks_count: failed.length,
+      reasons: notes,
+      energy_level: energy,
+      mood: mood,
+      productive_hours: parseFloat(AppState.todayPlan?.allocated_hours) || 6.0,
+      pm_feedback: pmFeedback
+    });
 
-  const feedbackBox = document.getElementById('pm-feedback-box');
-  const feedbackText = document.getElementById('pm-feedback-text');
-  if (feedbackBox && feedbackText) {
-    feedbackText.innerText = pmFeedback;
-    feedbackBox.classList.remove('hidden');
+    const feedbackBox = document.getElementById('pm-feedback-box');
+    const feedbackText = document.getElementById('pm-feedback-text');
+    if (feedbackBox && feedbackText) {
+      feedbackText.innerText = pmFeedback;
+      feedbackBox.classList.remove('hidden');
+    }
+
+    showToast('Review malam berhasil disimpan!');
+  } catch (err) {
+    console.error('Error submitting daily review:', err);
+    showToast('Gagal menyimpan review malam.', 'error');
   }
 }
 
 // ==========================================
-// 7. PROFILE & PREFERENCES SCREEN
+// 6. PROFILE & PREFERENCES SCREEN
 // ==========================================
 function renderProfileScreen() {
   const p = AppState.profile || {};
+  const isCloud = SlancarDB.isCloudReady();
 
   return `
     <div class="p-4 space-y-4">
@@ -633,26 +636,73 @@ function renderProfileScreen() {
         <h1 class="text-xl font-bold text-white tracking-tight">Profile & Preferences</h1>
       </div>
 
+      <!-- Cloud Status Banner -->
+      <div class="sl-card border-indigo-800/40 bg-slate-900/80 p-3.5 flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-3 h-3 rounded-full ${isCloud ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}"></div>
+          <div>
+            <h4 class="text-xs font-bold text-white">Status Database: ${isCloud ? 'Cloud Sync Aktif' : 'Penyimpanan Lokal'}</h4>
+            <p class="text-[11px] text-gray-400">${isCloud ? `Akun: ${AppState.user.email}` : 'Data tersimpan di HP & siap sync ke Supabase'}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Supabase Auth Section -->
+      <div class="sl-card space-y-3">
+        <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+          <i data-lucide="cloud" class="w-3.5 h-3.5"></i> Akun Cloud Supabase
+        </h3>
+        
+        ${isCloud ? `
+          <div class="space-y-2">
+            <p class="text-xs text-gray-300">Terhubung sebagai: <strong>${AppState.user.email}</strong></p>
+            <button onclick="handleSignOut()" class="w-full bg-slate-800 hover:bg-slate-700 text-rose-400 font-medium py-2 rounded-lg text-xs">
+              Keluar (Sign Out)
+            </button>
+          </div>
+        ` : `
+          <div class="space-y-2.5">
+            <div>
+              <label class="block text-[11px] text-gray-400 mb-1">Email:</label>
+              <input id="auth-email" type="email" placeholder="nama@email.com" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+            </div>
+            <div>
+              <label class="block text-[11px] text-gray-400 mb-1">Password:</label>
+              <input id="auth-password" type="password" placeholder="Minimal 6 karakter" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+            </div>
+            <div class="grid grid-cols-2 gap-2 pt-1">
+              <button onclick="handleSignIn()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 rounded-lg text-xs">
+                Masuk (Login)
+              </button>
+              <button onclick="handleSignUp()" class="bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2 rounded-lg text-xs">
+                Daftar Akun Baru
+              </button>
+            </div>
+            <p class="text-[10px] text-gray-500">Dengan login, data tugas & jadwalmu akan tersimpan aman di server Supabase.</p>
+          </div>
+        `}
+      </div>
+
       <!-- Cloud Sync & API Settings -->
       <div class="sl-card space-y-3">
         <h3 class="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
-          <i data-lucide="key" class="w-3.5 h-3.5"></i> API & Cloud Sync (Gratis)
+          <i data-lucide="key" class="w-3.5 h-3.5"></i> Kunci API Supabase & Gemini
         </h3>
         
         <div>
           <label class="block text-[11px] text-gray-400 mb-1">Supabase Project URL:</label>
-          <input id="cfg-supa-url" type="text" value="${SlancarConfig.SUPABASE_URL}" placeholder="https://xyz.supabase.co" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+          <input id="cfg-supa-url" type="text" value="${SlancarConfig.SUPABASE_URL}" placeholder="https://xyz.supabase.co" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono">
         </div>
 
         <div>
           <label class="block text-[11px] text-gray-400 mb-1">Supabase Anon Key:</label>
-          <input id="cfg-supa-key" type="password" value="${SlancarConfig.SUPABASE_ANON_KEY}" placeholder="eyJhbGciOi..." class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+          <input id="cfg-supa-key" type="password" value="${SlancarConfig.SUPABASE_ANON_KEY}" placeholder="eyJhbGciOi..." class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono">
         </div>
 
         <div>
           <label class="block text-[11px] text-gray-400 mb-1">Google Gemini API Key (Untuk PM Brain):</label>
-          <input id="cfg-gemini-key" type="password" value="${SlancarConfig.GEMINI_API_KEY}" placeholder="AIzaSy..." class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
-          <span class="text-[10px] text-gray-500">Dapatkan gratis dari Google AI Studio (1500 request/hari gratis).</span>
+          <input id="cfg-gemini-key" type="password" value="${SlancarConfig.GEMINI_API_KEY}" placeholder="AIzaSy..." class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono">
+          <span class="text-[10px] text-gray-500">Dapatkan gratis di aistudio.google.com (1500 request/hari gratis).</span>
         </div>
 
         <button onclick="saveApiSettings()" class="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-medium py-2 rounded-lg text-xs">
@@ -693,17 +743,54 @@ function renderProfileScreen() {
           <input id="prof-capacity" type="number" step="0.5" value="${p.daily_capacity_hours || 8.0}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
         </div>
 
-        <div>
-          <label class="block text-[11px] text-gray-400 mb-1">Target Penghasilan Bulanan (Rp):</label>
-          <input id="prof-income" type="number" value="${p.income_target || 20000000}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
-        </div>
-
         <button onclick="saveProfileSettings()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2.5 rounded-xl text-xs shadow-lg shadow-indigo-600/30">
-          Simpan Preferensi
+          Simpan Preferensi Kapasitas
         </button>
       </div>
     </div>
   `;
+}
+
+async function handleSignUp() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value.trim();
+  if (!email || !password) {
+    showToast('Harap isi email dan password', 'error');
+    return;
+  }
+  try {
+    const user = await SlancarDB.signUp(email, password);
+    AppState.user = user;
+    showToast('Akun berhasil dibuat! Cloud Sync aktif.');
+    await loadAppData();
+    renderApp();
+  } catch (e) {
+    showToast(e.message || 'Gagal mendaftar', 'error');
+  }
+}
+
+async function handleSignIn() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value.trim();
+  if (!email || !password) {
+    showToast('Harap isi email dan password', 'error');
+    return;
+  }
+  try {
+    const user = await SlancarDB.signIn(email, password);
+    AppState.user = user;
+    showToast('Berhasil masuk! Cloud Sync aktif.');
+    await loadAppData();
+    renderApp();
+  } catch (e) {
+    showToast(e.message || 'Gagal masuk', 'error');
+  }
+}
+
+async function handleSignOut() {
+  await SlancarDB.signOut();
+  showToast('Telah keluar dari akun.');
+  renderApp();
 }
 
 function saveApiSettings() {
@@ -713,7 +800,7 @@ function saveApiSettings() {
 
   SlancarConfig.saveConfig(url, supaKey, geminiKey);
   initSupabase();
-  alert('Konfigurasi API berhasil disimpan!');
+  showToast('Kunci konfigurasi berhasil disimpan!');
   loadAppData().then(() => renderApp());
 }
 
@@ -723,26 +810,26 @@ async function saveProfileSettings() {
     sleep_time: document.getElementById('prof-sleep').value,
     office_start_time: document.getElementById('prof-office-start').value,
     office_end_time: document.getElementById('prof-office-end').value,
-    daily_capacity_hours: parseFloat(document.getElementById('prof-capacity').value) || 8.0,
-    income_target: parseFloat(document.getElementById('prof-income').value) || 0
+    daily_capacity_hours: parseFloat(document.getElementById('prof-capacity').value) || 8.0
   };
 
-  await SlancarDB.updateProfile(AppState.user?.id || 'demo-user', updated);
+  await SlancarDB.updateProfile(AppState.user?.id, updated);
   AppState.profile = { ...AppState.profile, ...updated };
-  alert('Preferensi kapasitas berhasil diperbarui!');
+  showToast('Preferensi kapasitas berhasil disimpan!');
   renderApp();
 }
 
 // Actions
 async function markTaskDone(taskId) {
   await SlancarDB.updateTaskStatus(taskId, 'completed');
-  const t = AppState.tasks.find(x => x.id === taskId);
+  const t = (AppState.tasks || []).find(x => x.id === taskId);
   if (t) t.status = 'completed';
+  showToast('Tugas ditandai selesai! Bagus sekali.');
   renderApp();
 }
 
 async function toggleTaskDone(taskId) {
-  const t = AppState.tasks.find(x => x.id === taskId);
+  const t = (AppState.tasks || []).find(x => x.id === taskId);
   if (!t) return;
   const newStatus = t.status === 'completed' ? 'todo' : 'completed';
   await SlancarDB.updateTaskStatus(taskId, newStatus);
@@ -752,69 +839,96 @@ async function toggleTaskDone(taskId) {
 
 // Modal Helpers
 function openModal(id) {
-  document.getElementById(id).classList.add('active');
+  const el = document.getElementById(id);
+  if (el) {
+    el.classList.add('active');
+    lucide.createIcons();
+  }
 }
 
 function closeModal(id) {
-  document.getElementById(id).classList.remove('active');
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('active');
 }
 
-// Task Creator
+// Task Creator with Custom Type & Priority Override
 async function handleCreateTask(e) {
   e.preventDefault();
-  const title = document.getElementById('new-task-title').value;
-  const type = document.getElementById('new-task-type').value;
-  const hours = parseFloat(document.getElementById('new-task-hours').value) || 1.0;
-  const deadlineType = document.getElementById('new-task-deadline-type').value;
-  const deadlineDate = document.getElementById('new-task-deadline-date').value || null;
+  try {
+    const title = document.getElementById('new-task-title').value.trim();
+    const typeSelect = document.getElementById('new-task-type').value;
+    const customTypeName = document.getElementById('new-task-custom-name')?.value?.trim() || '';
+    const customBaseScore = document.getElementById('new-task-custom-score')?.value || 70;
+    const hours = parseFloat(document.getElementById('new-task-hours').value) || 1.0;
+    const deadlineType = document.getElementById('new-task-deadline-type').value;
+    const deadlineDate = document.getElementById('new-task-deadline-date').value || null;
+    const priorityOverride = document.getElementById('new-task-priority-override')?.value || null;
 
-  const newTask = await SlancarDB.createTask({
-    user_id: AppState.user?.id || 'demo-user',
-    title,
-    task_type: type,
-    estimated_hours: hours,
-    deadline_type: deadlineType,
-    deadline_date: deadlineDate
-  });
+    if (!title) {
+      showToast('Judul tugas harus diisi', 'error');
+      return;
+    }
 
-  AppState.tasks.unshift(newTask);
-  closeModal('task-modal');
-  renderApp();
+    const isCustomType = typeSelect === 'custom';
+    const taskPayload = {
+      title,
+      task_type: isCustomType ? 'side_hustle' : typeSelect,
+      custom_type_name: isCustomType ? customTypeName : null,
+      custom_base_score: isCustomType ? parseInt(customBaseScore, 10) : null,
+      estimated_hours: hours,
+      deadline_type: deadlineType,
+      deadline_date: deadlineDate,
+      priority_override: priorityOverride ? parseInt(priorityOverride, 10) : null
+    };
+
+    taskPayload.priority_score = SlancarDecisionEngine.calculateScore(taskPayload);
+
+    await SlancarDB.createTask(taskPayload);
+    AppState.tasks = await SlancarDB.getTasks(AppState.user?.id);
+
+    closeModal('task-modal');
+    showToast('Tugas berhasil ditambahkan ke Backlog!');
+    renderApp();
+  } catch (err) {
+    console.error('Error creating task:', err);
+    showToast('Gagal menambahkan tugas.', 'error');
+  }
 }
 
 // Goal Creator
 async function handleCreateGoal(e) {
   e.preventDefault();
-  const title = document.getElementById('new-goal-title').value;
-  const target = parseFloat(document.getElementById('new-goal-target').value) || 100;
-  const metric = document.getElementById('new-goal-metric').value;
+  try {
+    const title = document.getElementById('new-goal-title').value.trim();
+    const target = parseFloat(document.getElementById('new-goal-target').value) || 100;
+    const metric = document.getElementById('new-goal-metric').value.trim() || 'Unit';
 
-  const newGoal = await SlancarDB.createGoal({
-    user_id: AppState.user?.id || 'demo-user',
-    title,
-    target_value: target,
-    metric,
-    current_value: 0
-  });
+    if (!title) {
+      showToast('Judul Goal harus diisi', 'error');
+      return;
+    }
 
-  AppState.goals.unshift(newGoal);
-  closeModal('goal-modal');
-  renderApp();
+    await SlancarDB.createGoal({
+      title,
+      target_value: target,
+      metric,
+      current_value: 0
+    });
+
+    AppState.goals = await SlancarDB.getGoals(AppState.user?.id);
+    closeModal('goal-modal');
+    showToast('Goal berhasil dibuat!');
+    renderApp();
+  } catch (err) {
+    console.error('Error creating goal:', err);
+    showToast('Gagal membuat goal.', 'error');
+  }
 }
 
-// Project Creator
-async function handleCreateProject(e) {
-  e.preventDefault();
-  const title = document.getElementById('new-proj-title').value;
-  const desc = document.getElementById('new-proj-desc').value;
-
-  const newProj = await SlancarDB.createProject({
-    user_id: AppState.user?.id || 'demo-user',
-    title,
-    description: desc
-  });
-
-  AppState.projects.unshift(newProj);
-  closeModal('project-modal');
-  renderApp();
+// Toggle Custom Type Fields in Task Modal
+function handleTaskTypeChange(val) {
+  const customBox = document.getElementById('custom-task-fields');
+  if (customBox) {
+    customBox.classList.toggle('hidden', val !== 'custom');
+  }
 }

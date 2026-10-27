@@ -1,6 +1,7 @@
 // ==================================================
 // SLANCAR DECISION ENGINE (BUSINESS RULES & MATH)
 // "Think First, Then Speak" — Pure Deterministic Logic
+// Supports Custom Task Types & Priority Overrides
 // ==================================================
 
 const SlancarDecisionEngine = {
@@ -16,8 +17,18 @@ const SlancarDecisionEngine = {
 
   // Calculate Priority Score deterministically
   calculateScore(task) {
-    let score = this.BASE_PRIORITIES[task.task_type] || 50;
+    // 1. If user provided a manual priority override, respect it!
+    if (task.priority_override && !isNaN(parseInt(task.priority_override, 10))) {
+      return parseInt(task.priority_override, 10);
+    }
 
+    // 2. Base score from task type or custom score
+    let score = this.BASE_PRIORITIES[task.task_type];
+    if (score === undefined) {
+      score = parseInt(task.custom_base_score, 10) || 70; // Default for custom type
+    }
+
+    // 3. Deadline proximity calculation
     if (task.deadline_date) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -26,7 +37,7 @@ const SlancarDecisionEngine = {
       const diffDays = Math.round((deadline - today) / (1000 * 60 * 60 * 24));
 
       if (diffDays < 0) {
-        score += 100; // Overdue: Max emergency weight
+        score += 100; // Overdue: Max urgency
       } else if (diffDays === 0) {
         score += 60; // Due today
       } else if (diffDays <= 2) {
@@ -40,7 +51,7 @@ const SlancarDecisionEngine = {
       }
     }
 
-    // Quick Win bonus for momentum
+    // 4. Quick win bonus for tasks <= 1 hour
     if (parseFloat(task.estimated_hours) <= 1.0) {
       score += 5;
     }
@@ -50,13 +61,13 @@ const SlancarDecisionEngine = {
 
   // Analyze Capacity & Filter Tasks for the 06:00 Plan
   evaluateDayPlan(profile, tasks) {
-    const rawCapacity = parseFloat(profile.daily_capacity_hours) || 8.0;
-    const bufferPct = parseFloat(profile.buffer_percentage) || 0.15;
+    const rawCapacity = parseFloat(profile?.daily_capacity_hours) || 8.0;
+    const bufferPct = parseFloat(profile?.buffer_percentage) || 0.15;
     const effectiveCapacity = rawCapacity * (1 - bufferPct); // Preserves 15% safety buffer
     const bufferHours = rawCapacity * bufferPct;
 
     // Filter only active/todo tasks
-    const candidateTasks = tasks
+    const candidateTasks = (tasks || [])
       .filter(t => t.status === 'todo' || t.status === 'in_progress')
       .map(t => ({
         ...t,
@@ -76,7 +87,7 @@ const SlancarDecisionEngine = {
       } else {
         deferredTasks.push({
           task,
-          reason: `Kapasitas efektif (${effectiveCapacity.toFixed(1)} jam) sudah penuh. Tugas diprioritaskan untuk besok guna menjaga buffer ${bufferHours.toFixed(1)} jam.`
+          reason: `Kapasitas efektif (${effectiveCapacity.toFixed(1)} jam) sudah penuh. Tugas diprioritaskan untuk esok hari guna menjaga buffer ${bufferHours.toFixed(1)} jam.`
         });
       }
     }
@@ -98,10 +109,10 @@ const SlancarDecisionEngine = {
   // Generate Hourly Time Slots based on working hours
   generateScheduleSlots(profile, scheduledTasks) {
     const slots = [];
-    let currentHour = 9; // Default office or workday start
+    let currentHour = 9;
     let currentMinute = 0;
 
-    if (profile.office_start_time) {
+    if (profile?.office_start_time) {
       const parts = profile.office_start_time.split(':');
       currentHour = parseInt(parts[0], 10) || 9;
     }
@@ -112,7 +123,6 @@ const SlancarDecisionEngine = {
 
       const startTimeStr = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
       
-      // Add duration
       let endTotalMin = (currentHour * 60 + currentMinute) + durationMinutes;
       let endHour = Math.floor(endTotalMin / 60);
       let endMin = endTotalMin % 60;
@@ -121,13 +131,13 @@ const SlancarDecisionEngine = {
       slots.push({
         task_id: task.id,
         task_title: task.title,
-        task_type: task.task_type,
+        task_type: task.custom_type_name || task.task_type,
         start_time: startTimeStr,
         end_time: endTimeStr,
         estimated_hours: durationHours
       });
 
-      // Advance time with a 15 min mental buffer between tasks
+      // 15 min mental buffer between tasks
       endTotalMin += 15;
       currentHour = Math.floor(endTotalMin / 60);
       currentMinute = endTotalMin % 60;

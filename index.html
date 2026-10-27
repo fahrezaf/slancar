@@ -38,12 +38,15 @@
 </head>
 <body class="bg-[#05080E] text-slate-100 flex justify-center items-center min-h-screen">
 
+  <!-- Floating Toast Notification -->
+  <div id="toast" class="toast">Notifikasi Slancar</div>
+
   <!-- Mobile Frame Container -->
   <div class="mobile-container w-full min-h-screen">
     
     <!-- Active Screen Dynamic Content -->
     <main id="screen-content" class="flex-1">
-      <!-- Injected via app.js -->
+      <!-- Injected immediately via app.js -->
     </main>
 
     <!-- Bottom Navigation Bar (5 Core Tabs) -->
@@ -95,19 +98,35 @@
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-semibold text-gray-300 mb-1">Tipe Tugas</label>
-              <select id="new-task-type" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white">
+              <select id="new-task-type" onchange="handleTaskTypeChange(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white">
                 <option value="office_work">Office Work (100)</option>
                 <option value="client_freelance">Freelance (90)</option>
                 <option value="side_hustle">Side Hustle (80)</option>
                 <option value="gym">Gym / Fitness (60)</option>
                 <option value="learning">Learning (30)</option>
                 <option value="entertainment">Entertainment (10)</option>
+                <option value="custom">+ Custom Tipe Sendiri...</option>
               </select>
             </div>
 
             <div>
               <label class="block text-xs font-semibold text-gray-300 mb-1">Estimasi Jam</label>
               <input id="new-task-hours" type="number" step="0.25" min="0.25" max="12" value="1.5" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            </div>
+          </div>
+
+          <!-- Dynamic Custom Task Type Box -->
+          <div id="custom-task-fields" class="hidden p-3 rounded-xl bg-slate-950/70 border border-indigo-700/40 space-y-2.5">
+            <span class="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block">Kustomisasi Tipe Tugas:</span>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-[10px] text-gray-400 mb-1">Nama Tipe Kustom:</label>
+                <input id="new-task-custom-name" type="text" placeholder="Contoh: Coding / Desain" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+              </div>
+              <div>
+                <label class="block text-[10px] text-gray-400 mb-1">Base Priority (1-100):</label>
+                <input id="new-task-custom-score" type="number" min="1" max="100" value="75" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+              </div>
             </div>
           </div>
 
@@ -126,8 +145,14 @@
             </div>
           </div>
 
+          <div>
+            <label class="block text-xs font-semibold text-gray-300 mb-1">Override Skor Prioritas (Opsional)</label>
+            <input id="new-task-priority-override" type="number" placeholder="Kosongkan jika ingin dihitung otomatis oleh AI" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+            <span class="text-[10px] text-gray-500">Isi angka langsung (misal: 120) jika ingin memaksakan prioritas tertentu.</span>
+          </div>
+
           <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl text-xs mt-2 shadow-lg shadow-indigo-600/30">
-            Simpan ke Backlog
+            Simpan Tugas ke Backlog
           </button>
         </form>
       </div>
@@ -169,36 +194,6 @@
       </div>
     </div>
 
-    <!-- ========================================== -->
-    <!-- MODAL: CREATE PROJECT BOTTOM SHEET -->
-    <!-- ========================================== -->
-    <div id="project-modal" class="modal-overlay" onclick="if(event.target === this) closeModal('project-modal')">
-      <div class="modal-sheet">
-        <div class="flex justify-between items-center mb-4">
-          <h3 class="text-sm font-bold text-white uppercase tracking-wider">Tambah Proyek</h3>
-          <button onclick="closeModal('project-modal')" class="text-gray-400 hover:text-white">
-            <i data-lucide="x" class="w-5 h-5"></i>
-          </button>
-        </div>
-
-        <form onsubmit="handleCreateProject(event)" class="space-y-3.5">
-          <div>
-            <label class="block text-xs font-semibold text-gray-300 mb-1">Nama Proyek</label>
-            <input id="new-proj-title" type="text" required placeholder="Contoh: Destroyer Ship" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white">
-          </div>
-
-          <div>
-            <label class="block text-xs font-semibold text-gray-300 mb-1">Deskripsi Singkat</label>
-            <textarea id="new-proj-desc" rows="2" placeholder="Tujuan proyek ini..." class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-white"></textarea>
-          </div>
-
-          <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 rounded-xl text-xs mt-2 shadow-lg shadow-indigo-600/30">
-            Simpan Proyek
-          </button>
-        </form>
-      </div>
-    </div>
-
   </div>
 
   <!-- Scripts -->
@@ -208,13 +203,13 @@
   <script src="js/aiManager.js"></script>
   <script src="js/app.js"></script>
 
-  <!-- Service Worker Registration for PWA Store Readiness -->
+  <!-- PWA Service Worker Registration -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
           .then((reg) => console.log('ServiceWorker registered:', reg.scope))
-          .catch((err) => console.log('ServiceWorker registration failed:', err));
+          .catch((err) => console.log('ServiceWorker error:', err));
       });
     }
   </script>
